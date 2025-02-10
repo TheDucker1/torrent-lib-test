@@ -28,7 +28,7 @@ private:
     lt::session m_session;
     std::string m_save_path = "./";
 
-    std::list<std::shared_ptr<media_base>> m_media_list;
+    std::list<std::unique_ptr<media_base>> m_media_list;
     
 };
 

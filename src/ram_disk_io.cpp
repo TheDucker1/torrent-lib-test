@@ -11,7 +11,7 @@ lt::storage_holder ram_disk_io::new_torrent(
 		lt::storage_index_t ret = m_free_slots.back();
 		m_free_slots.pop_back();
 		return ret;
-		};
+    };
 
 	lt::storage_index_t const idx = m_free_slots.empty() ?
 		m_torrents.end_index() :
@@ -120,17 +120,16 @@ void ram_disk_io::async_check_files(lt::storage_index_t storage,
 
 	ram_storage* st = m_torrents[storage].get();
 
-	lt::add_torrent_params tmp;
-	lt::add_torrent_params const* rd = resume_data ? resume_data : &tmp;
+    //change later
+    int need_full_check = 1;
 
-	lt::storage_error error;
-	lt::status_t const ret = [&] {
-		st->initialize(error);
-		
-        return lt::status_t::no_error;
-		}();
+	st->initialize();
 
-	boost::asio::post(m_ioc, [error, ret, handler] {handler(ret, error);});
+	boost::asio::post(m_ioc, [need_full_check, handler] {handler(
+                need_full_check ? 
+                    lt::status_t::need_full_check :
+                    lt::status_t::no_error, 
+                lt::storage_error());});
 }
 
 void ram_disk_io::async_rename_file(lt::storage_index_t, lt::file_index_t const idx,
@@ -160,8 +159,11 @@ void ram_disk_io::async_set_file_priority(lt::storage_index_t storage,
 		{ h(error, std::move(p)); });
 }
 
-void ram_disk_io::async_clear_piece(lt::storage_index_t, lt::piece_index_t index,
+void ram_disk_io::async_clear_piece(lt::storage_index_t storage, lt::piece_index_t index,
 	std::function<void(lt::piece_index_t)> handler) {
+
+	ram_storage* st = m_torrents[storage].get();
+    st->clear_piece(index);
 
 	boost::asio::post(m_ioc, [=] { handler(index); });
 }
@@ -175,7 +177,12 @@ void ram_disk_io::update_stats_counters(lt::counters&) const {
 }
 
 std::vector<lt::open_file_state> ram_disk_io::get_status(lt::storage_index_t) const {
-	return {};
+    lt::open_file_state dummy;
+    dummy.file_index = lt::file_index_t(0);
+    dummy.open_mode = lt::file_open_mode::read_write | lt::file_open_mode::no_atime;
+	return {
+        dummy
+    };
 }
 
 void ram_disk_io::submit_jobs() {

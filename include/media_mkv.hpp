@@ -23,21 +23,24 @@ private:
     void handle_get_seekhead();
     void handle_cue_and_track_head();
     void handle_cue_and_track_data();
+    void handle_cluster_head();
     void extend_search_head();
     std::int64_t const m_search_head_limit = std::int64_t(10)*1024*1024;
 
     struct cluster_helper {
         std::int64_t m_time;
-        std::int64_t m_cluster_pos;
+        std::pair<std::int64_t, std::int64_t> m_cluster_pos;
         
-        cluster_helper(std::int64_t tm, std::int64_t ps) : m_time(tm), m_cluster_pos(ps) {}
+        cluster_helper(std::int64_t tm, 
+                std::pair<std::int64_t, std::int64_t> ps) 
+            : m_time(tm), m_cluster_pos(ps) {}
         bool operator<(cluster_helper const& o) const { return m_time < o.m_time; }
     };
     struct codec_helper {
         std::uint64_t track_number;
         std::uint64_t pixel_width;
         std::uint64_t pixel_height;
-        std::string codec_name;
+        std::string codec_id;
         std::vector<char> codec_private;
     } m_codec_helper;
 
@@ -75,7 +78,8 @@ private:
         FINDING_SEEKHEAD,       // increasing data fetch to get seekhead
         GET_SEEKHEAD,           // have seekhead, find tracks, cuelist
         GET_CUE_AND_TRACK_HEAD, // first few byte of cue and track to determine the size later
-        GET_CUE_AND_TRACK_DATA, // have all needed data
+        GET_CUE_AND_TRACK_DATA, // first few byte of cue and track to determine the size later
+        GET_CLUSTER_HEAD,       // have all cluster head
         FINAL                   // have enough data for processing
     };
 
@@ -97,6 +101,7 @@ private:
     std::vector<std::pair<std::int64_t, std::int64_t>> m_clusters_pos;
 
     std::vector<cluster_helper> m_cluster_list;
+    int const m_cluster_need_size = 16;
 };
 
 

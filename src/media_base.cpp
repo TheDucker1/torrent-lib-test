@@ -8,15 +8,23 @@ media_base::media_base(
     m_mode(media_action_mode::INIT),
     m_handle(handle),
     m_file_index(file_index)
-{}
+{
+    lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
+
+    m_file_offset_in_torrent = fs.file_offset(get_file_index());
+    m_file_size_in_torrent = fs.file_size(get_file_index());
+
+}
 
 void media_base::update_last_receive_to_now() {
     if (!m_set_handle) return;
+    if (is_busy()) return;
     if (is_finish()) return;
     m_last_receive = std::chrono::steady_clock::now();
 }
 void media_base::check_last_receive_with_now() {
     if (!m_set_handle) return;
+    if (is_busy()) return;
     if (is_finish()) return;
     auto current_clock = std::chrono::steady_clock::now();
     // it has been 60 seconds since we receive any new piece (~1MB?)
@@ -31,6 +39,8 @@ void media_base::receive_piece(
         boost::shared_array<char> const buf_ptr,
         int const buf_size) {
     if (!m_set_handle) return;
+    if (is_busy()) return;
+
     auto it = m_awaiting_pieces.find(piece_index);
     if (it == m_awaiting_pieces.end()) return;
 
@@ -43,6 +53,7 @@ void media_base::set_receive_pieces(
     std::vector<lt::piece_index_t> const& pieces_list
 ) {
     if (!m_set_handle) return;
+    if (is_busy()) return;
     if (is_finish()) return;
     // either this or clear all awaiting pieces, test later
     if (m_awaiting_pieces.size()) return;
@@ -53,7 +64,7 @@ void media_base::set_receive_pieces(
         if (it != m_piece_data.end()) continue;
 
         m_awaiting_pieces.insert(i);
-        get_torrent_handle().piece_priority(i, lt::default_priority);
+        //get_torrent_handle().piece_priority(i, lt::default_priority);
         //std::cerr << "PRIORITIZE PIECE [" << i << "] WITH PRIORITY " << lt::default_priority << std::endl;
     }
     update_last_receive_to_now();
@@ -66,11 +77,8 @@ std::vector<lt::piece_index_t>
 
     lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
 
-    std::int64_t file_offset_in_torrent = fs.file_offset(get_file_index());
-    std::int64_t file_size_in_torrent = fs.file_size(get_file_index());
-
-    TORRENT_ASSERT(file_size_in_torrent <= offset + size);
-    std::int64_t piece_start_offset = file_offset_in_torrent + offset;
+    TORRENT_ASSERT(file_size_in_torrent() <= offset + size);
+    std::int64_t piece_start_offset = file_offset_in_torrent() + offset;
     std::int64_t piece_size = fs.piece_length();
 
     std::int64_t start_piece = piece_start_offset / piece_size;
@@ -97,10 +105,7 @@ std::pair<boost::shared_array<char>, int>
 
     lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
 
-    std::int64_t file_offset_in_torrent = fs.file_offset(get_file_index());
-    std::int64_t file_size_in_torrent = fs.file_size(get_file_index());
-
-    TORRENT_ASSERT(offset < file_size_in_torrent);
+    TORRENT_ASSERT(offset < file_size_in_torrent());
     std::int64_t piece_size = fs.piece_length();
     std::int64_t start_piece = offset / piece_size;
 
@@ -143,10 +148,28 @@ void media_base::process() {
 }
 
 void media_base::request_awaiting_pieces() {
+    if (!m_set_handle) return;
+    if (is_busy()) return;
+    if (is_finish()) return;
     for (lt::piece_index_t i: m_awaiting_pieces) {
-        get_torrent_handle().read_piece(i);
+
+        std::cerr << "[PIECE: " << i << "] [HAVE: " << get_torrent_handle().have_piece(i) << "]\n";
+
+        // only request when we have it
+        if (get_torrent_handle().have_piece(i))
+            get_torrent_handle().read_piece(i);
     }
     update_last_receive_to_now();
+}
+
+// not accepting any data writing
+bool media_base::is_busy() const {
+    if (!m_set_handle) return true;
+    if (m_mode == media_action_mode::CAN_FINISH) return true;
+    if (m_mode == media_action_mode::TRY_TO_FINISH) return true;
+    if (m_mode == media_action_mode::FINISH) return true;
+    if (m_mode == media_action_mode::FAIL) return true;
+    return false;
 }
 
 bool media_base::is_finish() const {

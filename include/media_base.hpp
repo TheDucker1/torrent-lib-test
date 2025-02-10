@@ -13,6 +13,7 @@ struct media_base {
     ~media_base() = default;
 
     bool is_finish() const;
+    bool is_busy() const;
     void receive_piece(lt::piece_index_t,
         boost::shared_array<char> const buf_ptr,
         int const buf_size);
@@ -43,6 +44,10 @@ protected:
     std::pair<boost::shared_array<char>, int> 
         get_piece_at_offset(std::int64_t offset) const;
 
+
+    std::int64_t file_offset_in_torrent() const { return m_file_offset_in_torrent; }
+    std::int64_t file_size_in_torrent() const { return m_file_size_in_torrent; }
+
     void set_receive_pieces(std::vector<lt::piece_index_t> const& pieces_list);
     void request_awaiting_pieces();
 
@@ -65,6 +70,9 @@ private:
     std::set<lt::piece_index_t> m_awaiting_pieces; // trigger the callback when empty
     std::map<lt::piece_index_t, std::pair<boost::shared_array<char>, int>>
         m_piece_data;
+
+    std::int64_t m_file_offset_in_torrent;
+    std::int64_t m_file_size_in_torrent;
 };
 
 #endif // MEDIA_BASE_H_

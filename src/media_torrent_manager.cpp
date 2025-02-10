@@ -37,10 +37,16 @@ void media_torrent_manager::handle_loop() {
                     piece_read_al->size
                 );
             }
+            else {
+                std::cerr << "[SERIOUS ERROR]: Read goes very wrong" << std::endl;
+            }
+        }
+        if (auto hash_fail_al = lt::alert_cast<lt::hash_failed_alert>(al)) {
+            std::cerr << "HASH FAIL AT PIECE " << hash_fail_al->piece_index << "\n";
         }
     }
 
-    for (auto media: m_media_list) {
+    for (auto& media: m_media_list) {
         media->process();
     }
     for (auto it = m_media_list.begin(), nx = std::next(it); it != m_media_list.end(); it = nx) {
@@ -75,7 +81,7 @@ void media_torrent_manager::handle_file_add(
     std::cerr << "ADDED FILE [ " << fn << " ] to manager" << std::endl;
 
     // based on file name, choose appropriate type
-    m_media_list.emplace_back(std::make_shared<media_mkv>(h, index));
+    m_media_list.emplace_back(std::make_unique<media_mkv>(h, index));
 }
 
 
@@ -106,7 +112,7 @@ void media_torrent_manager::add_torrent_download(
     }
     atp.save_path = m_save_path; // default save location
     atp.flags = lt::torrent_flags::default_dont_download |
-        lt::torrent_flags::upload_mode;
+        lt::torrent_flags::upload_mode; 
     atp.piece_priorities = 
         std::vector<lt::download_priority_t>(1, lt::dont_download);
     m_session.async_add_torrent(atp);
@@ -120,7 +126,7 @@ void media_torrent_manager::handle_piece_receive(
     int const piece_size
 ) {
 
-    for (auto media : m_media_list) {
+    for (auto& media : m_media_list) {
         if (media->get_torrent_handle() != handle) continue;
         media->receive_piece(idx, piece_buffer, piece_size);
     }

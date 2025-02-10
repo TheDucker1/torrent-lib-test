@@ -5,9 +5,16 @@ ram_storage::~ram_storage() {
 	release_files();
 }
 
+void ram_storage::clear_piece(
+    lt::piece_index_t piece
+) {
+    std::cerr << "[CLEAR PIECE " << piece << "]\n";
+    m_invalid.insert(piece);
+}
 lt::span<char const> ram_storage::readv(lt::peer_request const r, lt::storage_error& ec) const {
+    auto const it2 = m_invalid.find(r.piece);
 	auto const it = m_file_data.find(r.piece);
-	if (it == m_file_data.end()) {
+	if (it == m_file_data.end() || it2 != m_invalid.end()) {
 		ec.operation = lt::operation_t::file_read;
 		ec.ec = boost::asio::error::eof;
 		return {};
@@ -25,7 +32,9 @@ lt::span<char const> ram_storage::readv(lt::peer_request const r, lt::storage_er
 
 void ram_storage::writev(lt::span<char const> const b,
 	lt::piece_index_t const piece, int const offset) {
+
     has_changed_since = true;
+    m_invalid.erase(piece);
 	auto& data = m_file_data[piece];
 	if (data.empty()) {
 		// allocate all to avoid relocate data -> lost readv pointer
@@ -83,9 +92,10 @@ lt::sha256_hash ram_storage::hash2(lt::piece_index_t const piece, int const offs
 	return lt::hasher256(b).final();
 }
 
-lt::status_t ram_storage::initialize(
-	lt::storage_error& ec
-) {
+lt::status_t ram_storage::initialize() {
+    if (has_init_since) {
+		return lt::status_t::no_error;
+    } 
     has_init_since = true;
 	lt::error_code error;
 	auto f = open_file(open_mode::read_only, error);
@@ -135,6 +145,7 @@ lt::status_t ram_storage::initialize(
 	if (invalid_file) {
 		m_file_data.clear();
 	}
+    has_changed_since = false;
 
 	return lt::status_t::no_error;
 }
@@ -216,7 +227,7 @@ void ram_storage::set_file_priority(
 		m_file_priority.resize(prio.size(), lt::default_priority);
 }
 
-void ram_storage::release_files() const {
+void ram_storage::release_files() {
 	// flush all data to m_save_path+m_save_name;
     if (!has_changed_since) return; // no need to flush since we didn't download anything
 	lt::error_code ec;
@@ -247,4 +258,5 @@ void ram_storage::release_files() const {
         f.write(p_data.data(), p_data.size());
 	}
 
+    has_changed_since = false; // reset file status
 }

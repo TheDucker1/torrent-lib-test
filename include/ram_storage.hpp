@@ -29,9 +29,7 @@ struct ram_storage {
 	lt::sha256_hash hash2(lt::piece_index_t const piece, int const offset,
 		lt::storage_error& ec) const;
 
-	lt::status_t initialize(
-		lt::storage_error& ec
-	);
+	lt::status_t initialize();
 
 	std::pair<lt::status_t, std::string> move_storage(
 		std::string const& sp,
@@ -42,8 +40,11 @@ struct ram_storage {
 		lt::aux::vector<lt::download_priority_t, lt::file_index_t>& prio,
 		lt::storage_error& ec
 	);
+    void clear_piece(
+        lt::piece_index_t piece
+    );
 
-	void release_files() const;
+	void release_files();
 
 private:
 	enum class open_mode : std::uint8_t
@@ -95,6 +96,7 @@ private:
     bool has_changed_since;
 	lt::file_storage const& m_files;
 	std::map<lt::piece_index_t, std::vector<char>> m_file_data;
+    std::set<lt::piece_index_t> m_invalid;
 	std::string m_save_path;
 	std::string m_save_name;
 	lt::aux::vector<lt::download_priority_t, lt::file_index_t> m_file_priority;
