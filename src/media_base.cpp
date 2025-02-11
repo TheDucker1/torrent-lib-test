@@ -1,7 +1,7 @@
 #include"media_base.hpp"
 
 media_base::media_base(
-    lt::torrent_handle const& handle,
+    lt::torrent_handle const handle,
     lt::file_index_t const file_index
 ) : m_set_handle(true),
     m_last_receive(std::chrono::steady_clock::now()),
@@ -27,9 +27,9 @@ void media_base::check_last_receive_with_now() {
     if (is_busy()) return;
     if (is_finish()) return;
     auto current_clock = std::chrono::steady_clock::now();
-    // it has been 60 seconds since we receive any new piece (~1MB?)
+    // it has been 10 seconds since we receive any new piece (~1MB?)
     // request them again [TODO]
-    if ((current_clock - m_last_receive) > std::chrono::seconds{5}) {
+    if ((current_clock - m_last_receive) > std::chrono::seconds{10}) {
         request_awaiting_pieces();
     }
 }
@@ -64,7 +64,7 @@ void media_base::set_receive_pieces(
         if (it != m_piece_data.end()) continue;
 
         m_awaiting_pieces.insert(i);
-        //get_torrent_handle().piece_priority(i, lt::default_priority);
+        get_torrent_handle().piece_priority(i, lt::default_priority);
         //std::cerr << "PRIORITIZE PIECE [" << i << "] WITH PRIORITY " << lt::default_priority << std::endl;
     }
     update_last_receive_to_now();
@@ -152,8 +152,6 @@ void media_base::request_awaiting_pieces() {
     if (is_busy()) return;
     if (is_finish()) return;
     for (lt::piece_index_t i: m_awaiting_pieces) {
-
-        std::cerr << "[PIECE: " << i << "] [HAVE: " << get_torrent_handle().have_piece(i) << "]\n";
 
         // only request when we have it
         if (get_torrent_handle().have_piece(i))

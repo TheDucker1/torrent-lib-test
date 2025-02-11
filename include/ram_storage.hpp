@@ -7,7 +7,6 @@
 
 struct ram_storage {
 	explicit ram_storage(lt::storage_params const& p) :
-        has_init_since(false),
         has_changed_since(false),
 		m_files(p.files),
 		m_save_path(p.path),
@@ -28,8 +27,6 @@ struct ram_storage {
 
 	lt::sha256_hash hash2(lt::piece_index_t const piece, int const offset,
 		lt::storage_error& ec) const;
-
-	lt::status_t initialize();
 
 	std::pair<lt::status_t, std::string> move_storage(
 		std::string const& sp,
@@ -63,8 +60,6 @@ private:
             mode_ |= std::ios::out;
         }
 
-        mode_ |= std::ios::in;
-
         std::fstream ret(fpth, mode_);
         if (ret.fail()) {
             // create and close the file if not exists
@@ -92,7 +87,6 @@ private:
 		return _header_size;
 	}
 
-    bool has_init_since;
     bool has_changed_since;
 	lt::file_storage const& m_files;
 	std::map<lt::piece_index_t, std::vector<char>> m_file_data;

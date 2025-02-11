@@ -1,6 +1,8 @@
 #include"media_torrent_manager.hpp"
 #include"media_test.hpp"
 #include"media_mkv.hpp"
+#include<filesystem>
+#include<fstream>
 
 media_torrent_manager::media_torrent_manager(lt::session_params const& ses_params) :
     m_session(ses_params) {
@@ -17,7 +19,7 @@ void media_torrent_manager::handle_loop() {
                 // error in adding, skip torrent
                 continue;
             }
-            if (add_al->params.ti->is_valid()) {
+            if (add_al->params.ti != nullptr && add_al->params.ti->is_valid()) {
                 handle_torrent_add(add_al->handle);
             }
 
@@ -30,6 +32,7 @@ void media_torrent_manager::handle_loop() {
         }
         if (auto piece_read_al = lt::alert_cast<lt::read_piece_alert>(al)) {
             if (!piece_read_al->error) {
+                std::cerr << "RECEIVE PIECE " << piece_read_al->piece << "\n";
                 handle_piece_receive(
                     piece_read_al->handle,
                     piece_read_al->piece,
@@ -43,6 +46,9 @@ void media_torrent_manager::handle_loop() {
         }
         if (auto hash_fail_al = lt::alert_cast<lt::hash_failed_alert>(al)) {
             std::cerr << "HASH FAIL AT PIECE " << hash_fail_al->piece_index << "\n";
+        }
+        if (auto file_err_al = lt::alert_cast<lt::file_error_alert>(al)) {
+            std::cerr << "IO ERROR AT FILE " << std::string(file_err_al->filename()) << " YY\n";
         }
     }
 
@@ -62,6 +68,8 @@ void media_torrent_manager::handle_torrent_add(lt::torrent_handle const& h) {
     if (h.torrent_file() == nullptr) {
         return;
     }
+    check_resume_data(h);
+
     std::shared_ptr<lt::torrent_info const> ti = h.torrent_file();
     lt::file_storage const& fs = ti->files();
     for (lt::file_index_t i: fs.file_range()) {
@@ -93,8 +101,10 @@ void media_torrent_manager::add_torrent_download(
     lt::add_torrent_params atp = lt::parse_magnet_uri(
             maybe_magnet_uri_or_torrent_file_path,
             error);
+    int is_magnet = true;
     if (error) {
         // file is not a torrent
+        is_magnet = false;
         if (error == lt::errors::unsupported_url_protocol) {
             std::shared_ptr<lt::torrent_info> ti = 
                 std::make_shared<lt::torrent_info>(maybe_magnet_uri_or_torrent_file_path,
@@ -117,6 +127,56 @@ void media_torrent_manager::add_torrent_download(
         std::vector<lt::download_priority_t>(1, lt::dont_download);
     m_session.async_add_torrent(atp);
     return;
+}
+
+// or save and load a fast resume file, which is better
+void media_torrent_manager::check_resume_data(lt::torrent_handle const &th) {
+    std::string const th_save_name("." + 
+            lt::aux::to_hex(th.info_hash()) + ".pieceset"); 
+
+    std::filesystem::path fpth = std::filesystem::path(m_save_path) / 
+            std::filesystem::path(th_save_name);
+    std::ios::openmode mode_ = std::ios::binary | std::ios::in;
+
+    std::fstream save_f(fpth, mode_);
+    std::cerr << "Path: " << fpth << "\n";
+    if (save_f.fail()) {
+        std::cerr << " FOUND NO RESUME FILE \n";
+        return;
+    }
+
+    std::vector<char> header(1024, '\0');
+	char* ptr = header.data();
+    char const* end_ptr = header.data() + header.size();
+    save_f.read(header.data(), header.size());
+    if (save_f.gcount() != 1024) return;
+    std::int32_t const num_piece = lt::aux::read_int32(ptr);
+    std::int32_t const piece_size = lt::aux::read_int32(ptr);
+    std::vector<lt::piece_index_t> used_piece;
+	for (int i = 0; i < num_piece; ++i) {
+        if (ptr == end_ptr) {
+            ptr = header.data();
+            int byte_to_read = std::min(num_piece - i, 1024);
+            save_f.read(header.data(), byte_to_read);
+            if (save_f.gcount() != byte_to_read) {
+                return;
+            }
+        }
+		std::int8_t const used(lt::aux::read_int8(ptr));
+		if (used) {
+            used_piece.emplace_back(lt::piece_index_t(i));
+        }
+	}
+    lt::file_storage const& fs = th.torrent_file()->files();
+    std::vector<char> piece_data(fs.piece_length());
+    for (lt::piece_index_t i : used_piece) {
+        int this_piece_size = fs.piece_size(i);
+        save_f.read(piece_data.data(), piece_data.size());
+        if (save_f.gcount() != piece_data.size()) return;
+        std::cerr << "[ADD PIECE " << i << "]\n";
+        th.add_piece(i, piece_data.data());
+        th.piece_priority(i, lt::default_priority);
+    }
 }
 
 void media_torrent_manager::handle_piece_receive(

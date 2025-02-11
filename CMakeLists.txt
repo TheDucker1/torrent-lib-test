@@ -13,6 +13,8 @@ find_package(LibtorrentRasterbar CONFIG REQUIRED)
 pkg_check_modules( LIBAV REQUIRED IMPORTED_TARGET
     libavcodec
     libavformat
+    libavutil
+    libswscale
 )
 pkg_check_modules( LIBMATROSKA REQUIRED IMPORTED_TARGET
     libebml 
@@ -26,13 +28,15 @@ add_executable (torrentQuickMediaManager "src/torrentQuickMediaManager.cpp"
     "src/media_base.cpp" 
     "src/media_test.cpp" 
     "src/media_mkv.cpp" 
-    "src/media_torrent_manager.cpp")
+    "src/media_torrent_manager.cpp"
+)
 add_executable (customStorage "src/custom_storage.cpp")
 
 set_property(TARGET torrentQuickMediaManager PROPERTY CXX_STANDARD 20)
 set_property(TARGET customStorage PROPERTY CXX_STANDARD 20)
 
 target_include_directories(torrentQuickMediaManager PRIVATE "include")
+target_include_directories(torrentQuickMediaManager PRIVATE "lodepng")
 
 target_link_libraries(torrentQuickMediaManager PRIVATE LibtorrentRasterbar::torrent-rasterbar)
 target_link_libraries(torrentQuickMediaManager PRIVATE PkgConfig::LIBAV)

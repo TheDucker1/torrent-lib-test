@@ -7,7 +7,7 @@
 
 struct media_base {
     media_base(
-        lt::torrent_handle const& handle,
+        lt::torrent_handle const handle,
         lt::file_index_t const file_index
     ); 
     ~media_base() = default;
@@ -65,7 +65,7 @@ private:
     std::chrono::time_point<std::chrono::steady_clock> m_last_receive;
 
     media_action_mode m_mode; // current mode
-    lt::torrent_handle const& m_handle; // handle to torrent
+    lt::torrent_handle const m_handle; // handle to torrent
     lt::file_index_t const m_file_index; // which file
     std::set<lt::piece_index_t> m_awaiting_pieces; // trigger the callback when empty
     std::map<lt::piece_index_t, std::pair<boost::shared_array<char>, int>>

@@ -8,7 +8,6 @@ ram_storage::~ram_storage() {
 void ram_storage::clear_piece(
     lt::piece_index_t piece
 ) {
-    std::cerr << "[CLEAR PIECE " << piece << "]\n";
     m_invalid.insert(piece);
 }
 lt::span<char const> ram_storage::readv(lt::peer_request const r, lt::storage_error& ec) const {
@@ -90,64 +89,6 @@ lt::sha256_hash ram_storage::hash2(lt::piece_index_t const piece, int const offs
 	);
 	lt::span<char const> b = { it->second.data() + offset, len };
 	return lt::hasher256(b).final();
-}
-
-lt::status_t ram_storage::initialize() {
-    if (has_init_since) {
-		return lt::status_t::no_error;
-    } 
-    has_init_since = true;
-	lt::error_code error;
-	auto f = open_file(open_mode::read_only, error);
-	if (error) {
-		// cannot read file -> assume having no data
-		return lt::status_t::no_error;
-	}
-
-	//parse header
-	std::vector<char> _header(header_size());
-    f.read(_header.data(), _header.size());
-	if (f.gcount() != _header.size()) {
-		// cannot read header -> assume invalid file
-		return lt::status_t::no_error;
-	}
-
-	char* ptr = _header.data();
-	std::int32_t num_piece_ = lt::aux::read_int32(ptr);
-	std::int32_t piece_size_ = lt::aux::read_int32(ptr);
-	if (num_piece_ != m_files.num_pieces() || piece_size_ != m_files.piece_length()) {
-		// mismatch numpiece / piecesize -> assume invalid file
-		return lt::status_t::no_error;
-	}
-
-	std::vector<lt::piece_index_t> used_slots;
-	for (lt::piece_index_t i(0); i < lt::piece_index_t(num_piece_); ++i) {
-		std::int8_t const used(lt::aux::read_int8(ptr));
-		if (used) used_slots.emplace_back(i);
-	}
-
-	bool invalid_file = false;
-	std::vector<char> piece_data(piece_size_);
-	for (lt::piece_index_t const i : used_slots) {
-		std::int32_t this_piece_size = m_files.piece_size(i);
-
-        f.read(piece_data.data(), static_cast<std::size_t>(piece_size_));
-		if (f.gcount() != static_cast<std::size_t>(piece_size_)) {
-			invalid_file = true;
-			break;
-		}
-
-		auto& data = m_file_data[i];
-		data.resize(this_piece_size);
-		std::memcpy(data.data(), piece_data.data(), static_cast<std::size_t>(this_piece_size));
-	}
-
-	if (invalid_file) {
-		m_file_data.clear();
-	}
-    has_changed_since = false;
-
-	return lt::status_t::no_error;
 }
 
 std::pair<lt::status_t, std::string> ram_storage::move_storage(

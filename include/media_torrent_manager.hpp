@@ -29,6 +29,7 @@ private:
     std::string m_save_path = "./";
 
     std::list<std::unique_ptr<media_base>> m_media_list;
+    void check_resume_data(lt::torrent_handle const &th);
     
 };
 

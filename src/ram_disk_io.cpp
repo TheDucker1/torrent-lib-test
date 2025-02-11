@@ -118,17 +118,8 @@ void ram_disk_io::async_check_files(lt::storage_index_t storage,
 	lt::aux::vector<std::string, lt::file_index_t> links,
 	std::function<void(lt::status_t, lt::storage_error const&)> handler) {
 
-	ram_storage* st = m_torrents[storage].get();
-
-    //change later
-    int need_full_check = 1;
-
-	st->initialize();
-
-	boost::asio::post(m_ioc, [need_full_check, handler] {handler(
-                need_full_check ? 
-                    lt::status_t::need_full_check :
-                    lt::status_t::no_error, 
+	boost::asio::post(m_ioc, [handler] {handler(
+                lt::status_t::no_error,
                 lt::storage_error());});
 }
 
@@ -177,12 +168,7 @@ void ram_disk_io::update_stats_counters(lt::counters&) const {
 }
 
 std::vector<lt::open_file_state> ram_disk_io::get_status(lt::storage_index_t) const {
-    lt::open_file_state dummy;
-    dummy.file_index = lt::file_index_t(0);
-    dummy.open_mode = lt::file_open_mode::read_write | lt::file_open_mode::no_atime;
-	return {
-        dummy
-    };
+    return {};
 }
 
 void ram_disk_io::submit_jobs() {

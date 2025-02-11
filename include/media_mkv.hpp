@@ -101,7 +101,8 @@ private:
     std::vector<std::pair<std::int64_t, std::int64_t>> m_clusters_pos;
 
     std::vector<cluster_helper> m_cluster_list;
-    int const m_cluster_need_size = 16;
+    int const m_grid_size = 4;
+    int const m_cluster_need_size = m_grid_size * m_grid_size;
 };
 
 
