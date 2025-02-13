@@ -9,6 +9,7 @@ media_torrent_manager::media_torrent_manager(lt::session_params const& ses_param
 }
 
 void media_torrent_manager::handle_loop() {
+    std::lock_guard<std::mutex> guard(m_mutex);
     std::vector<lt::alert*> alerts;
     m_session.pop_alerts(&alerts);
 
@@ -58,7 +59,28 @@ void media_torrent_manager::handle_loop() {
     for (auto it = m_media_list.begin(), nx = std::next(it); it != m_media_list.end(); it = nx) {
         nx = std::next(it);
         if ((*it)->is_finish()) {
+            m_file_counter[(*it)->get_torrent_handle().info_hash()] -= 1;
             m_media_list.erase(it);
+        }
+    }
+
+    for (auto it = m_active_list.begin(), nx = std::next(it); it != m_active_list.end(); it = nx) {
+        nx = std::next(it);
+        if (m_file_counter[it->info_hash()] == 0) {
+            m_file_counter.erase(it->info_hash());
+            m_upload_list.emplace_back(*it);
+
+            m_active_list.erase(it);
+        }
+    }
+
+    auto cur_clock = std::chrono::steady_clock::now();
+    for (auto it = m_upload_list.begin(), nx = std::next(it); it != m_upload_list.end(); it = nx) {
+        nx = std::next(it);
+        if (cur_clock - it->add_tm > std::chrono::minutes{30}) {
+            std::cerr << "remove torrent\n";
+            m_session.remove_torrent(it->handle);
+            m_upload_list.erase(it);
         }
     }
 };
@@ -69,7 +91,16 @@ void media_torrent_manager::handle_torrent_add(lt::torrent_handle const& h) {
         return;
     }
     check_resume_data(h);
+    h.unset_flags(lt::torrent_flags::upload_mode);
 
+    auto it = m_pending_update.find(h.info_hash());
+    if (it != m_pending_update.end()) {
+        m_upload_list.emplace_back(h);
+        m_pending_update.erase(it);
+        return;
+    }
+
+    m_active_list.emplace_back(h);
     std::shared_ptr<lt::torrent_info const> ti = h.torrent_file();
     lt::file_storage const& fs = ti->files();
     for (lt::file_index_t i: fs.file_range()) {
@@ -77,9 +108,8 @@ void media_torrent_manager::handle_torrent_add(lt::torrent_handle const& h) {
         std::string sv(fs.file_name(i));
         if (!is_support_media(sv)) continue;
         handle_file_add(h, i, sv);
-        //m_media_list.emplace_back(h, i);
+        m_file_counter[h.info_hash()] += 1;
     }
-    h.unset_flags(lt::torrent_flags::upload_mode);
 }
 void media_torrent_manager::handle_file_add(
     lt::torrent_handle const& h,
@@ -92,10 +122,11 @@ void media_torrent_manager::handle_file_add(
     m_media_list.emplace_back(std::make_unique<media_mkv>(h, index));
 }
 
-
 void media_torrent_manager::add_torrent_download(
-    std::string const& maybe_magnet_uri_or_torrent_file_path
+    std::string const& maybe_magnet_uri_or_torrent_file_path,
+    int const upload_mode 
     ) {
+    std::lock_guard<std::mutex> guard(m_mutex);
 
     lt::error_code error;
     lt::add_torrent_params atp = lt::parse_magnet_uri(
@@ -120,6 +151,13 @@ void media_torrent_manager::add_torrent_download(
             return;
         }
     }
+
+    if (upload_mode) {
+        if (is_magnet) m_pending_update.insert(atp.info_hashes.get(lt::protocol_version::V1));
+        else m_pending_update.insert(atp.ti->info_hash());
+    }
+
+
     atp.save_path = m_save_path; // default save location
     atp.flags = lt::torrent_flags::default_dont_download |
         lt::torrent_flags::upload_mode; 
