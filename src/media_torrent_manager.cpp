@@ -69,6 +69,7 @@ void media_torrent_manager::handle_loop() {
         if (m_file_counter[it->info_hash()] == 0) {
             m_file_counter.erase(it->info_hash());
             m_upload_list.emplace_back(*it);
+            it->set_flags(lt::torrent_flags::upload_mode);
 
             m_active_list.erase(it);
         }
@@ -90,6 +91,7 @@ void media_torrent_manager::handle_torrent_add(lt::torrent_handle const& h) {
     if (h.torrent_file() == nullptr) {
         return;
     }
+    h.unset_flags(lt::torrent_flags::auto_managed);
     check_resume_data(h);
     h.unset_flags(lt::torrent_flags::upload_mode);
 

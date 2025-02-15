@@ -1,6 +1,5 @@
 // tcp client to send .torrent path from taiga to manager
-// we disguise as transmission-remote
-// g++ ../src/torrentAdder.cpp --static -o transmission-remote.exe -lws2_32
+// g++ ../src/torrentAdder.cpp --static -o torrentAdder.exe -lws2_32
 
 #include<string>
 #include<boost/asio.hpp>
@@ -20,7 +19,7 @@ int WINAPI WinMain(
     boost::asio::io_context m_context;
     tcp::socket m_socket(m_context);
     m_socket.connect(
-        tcp::endpoint(boost::asio::ip::address::from_string("127.0.0.1"),
+        tcp::endpoint(boost::asio::ip::make_address("127.0.0.1"),
             1205)
     );
 

@@ -14,6 +14,8 @@
 
 #include<libtorrent/libtorrent.hpp>
 
+#include<boost/asio.hpp>
+
 namespace lodepng {
     #include"lodepng.h"
     #include"lodepng.cpp"
@@ -366,11 +368,49 @@ void media_mkv::process_final() {
         std::unique_ptr<unsigned char, decltype([](unsigned char* p){
             free(p);
         })> png_ptr(png_buf);
+        /*
         lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
         std::string fp = fs.file_path(get_file_index());
         std::string fn = lt::aux::to_hex(get_torrent_handle().info_hash()) + "_" +
             lt::aux::to_hex(lt::hasher(fp.data(), fp.size()).final()) + ".png"; 
         write_file(fn, (char*)png_buf, png_size);
+        */
+        try { // send payload to a discord bot for broadcast
+            boost::asio::io_context m_context;
+            boost::asio::ip::tcp::socket m_socket(m_context);
+
+            m_socket.connect(
+                boost::asio::ip::tcp::endpoint(
+                    boost::asio::ip::make_address("127.0.0.1"),
+                    8890)
+            );
+
+            std::uint32_t const serv_type_ = 2;
+            std::uint32_t const serv_type = htonl(serv_type_);
+
+            lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
+            lt::string_view const m_filename = fs.file_name(get_file_index());
+
+            std::uint32_t const filename_size_ = m_filename.size();
+            std::uint32_t const filename_size = htonl(filename_size_);
+
+            std::uint32_t const buf_size_ = png_size;
+            //std::uint32_t const buf_size = htonl(buf_size_);
+
+            std::uint32_t total_size_ = sizeof(std::uint32_t) + filename_size_ + 
+                            buf_size_;
+            std::uint32_t total_size = htonl(total_size_);
+
+            boost::asio::write(m_socket, boost::asio::buffer(&serv_type, 4));
+            boost::asio::write(m_socket, boost::asio::buffer(&total_size, 4));
+            boost::asio::write(m_socket, boost::asio::buffer(&filename_size, 4));
+            boost::asio::write(m_socket, boost::asio::buffer(m_filename.data(), filename_size_));
+            //boost::asio::write(m_socket, boost::asio::buffer(&buf_size, 4));
+            boost::asio::write(m_socket, boost::asio::buffer(png_buf, buf_size_));
+        } catch (std::exception& e) {
+            std::cerr << "[SERIOUS ERROR]: " << e.what() << std::endl;
+            return process_final_fail();
+        }
 
         std::cerr << "[ FINISH GENERATING THUMBNAIL ]\n";
 
