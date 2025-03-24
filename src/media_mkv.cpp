@@ -182,17 +182,6 @@ void media_mkv::process_final() {
         }
         libav::AVCodec const * const codec = libav::avcodec_find_decoder(codecId);
 
-        std::unique_ptr<libav::AVCodecContext, decltype([]
-            (libav::AVCodecContext *ctx)->void{
-                libav::avcodec_free_context(&ctx);
-        })> ctx(
-            libav::avcodec_alloc_context3(NULL)
-        );
-        if (ctx == nullptr) {
-            std::cerr << "[SERIOUS ERROR]: Cannot alloc context" << std::endl;
-            return process_final_fail();
-        }
-
         std::unique_ptr<libav::AVCodecParameters, decltype([]
             (libav::AVCodecParameters* params) {
             libav::avcodec_parameters_free(&params);
@@ -211,20 +200,22 @@ void media_mkv::process_final() {
                     m_codec_helper.codec_private.size());
         }
 
-        if ((averror_ret = libav::avcodec_parameters_to_context(ctx.get(), params.get())) < 0) {
-            std::cerr << "[SERIOUS ERROR]: Cannot apply ctx params" << std::endl;
-            std::cerr << libav_err(averror_ret) << "\n";
-            return process_final_fail();
-        }
-
-        if ((averror_ret = libav::avcodec_open2(ctx.get(), codec, NULL)) < 0) {
-            std::cerr << "[SERIOUS ERROR]: Cannot open ctx codec" << std::endl;
-            std::cerr << libav_err(averror_ret) << "\n";
-            return process_final_fail();
-        }
-
-        ctx->width = m_codec_helper.pixel_width;
-        ctx->height = m_codec_helper.pixel_height;
+        using codecContextPtr = std::unique_ptr<libav::AVCodecContext,decltype([]
+            (libav::AVCodecContext *ctx)->void{
+                libav::avcodec_free_context(&ctx);
+            })>;
+        auto create_ctx = [&]() -> codecContextPtr {
+            codecContextPtr ctx(libav::avcodec_alloc_context3(NULL));
+            if (ctx) {
+                averror_ret = libav::avcodec_parameters_to_context(ctx.get(), params.get());
+                if (averror_ret < 0) return codecContextPtr(nullptr);
+                averror_ret = libav::avcodec_open2(ctx.get(), codec, NULL);
+                if (averror_ret < 0) return codecContextPtr(nullptr);
+                ctx->width = m_codec_helper.pixel_width;
+                ctx->height = m_codec_helper.pixel_height;
+            }
+            return std::move(ctx);
+        };
 
         std::unique_ptr<libav::AVFrame, decltype([](libav::AVFrame* p) {
             libav::av_frame_free(&p);
@@ -266,8 +257,19 @@ void media_mkv::process_final() {
             (enum libav::AVPixelFormat)frame_rgb->format, 1
         );
 
+        std::vector<codecContextPtr> ctxVt;
+        std::vector<std::unique_ptr<KaxCluster>> clusterVt;
+        std::vector<KaxSimpleBlock*> blockVt;
+        std::vector<int> needPacketVt;
         for (int i = 0; i < m_cluster_need_size; ++i) {
-            // std::cerr << "[ CLUSTER " << (i+1) << " ]\n";
+            std::cerr << "[ CLUSTER " << (i+1) << " ]\n";
+
+            codecContextPtr ctx = create_ctx();
+            if (ctx == nullptr) {
+                std::cerr << "[SERIOUS ERROR]: Cannot alloc context" << std::endl;
+                return process_final_fail();
+            }
+            ctxVt.emplace_back(std::move(ctx));
 
             cluster_helper const& _cluster = m_cluster_list[i];
             m_stream.I_O().setFilePointer(_cluster.m_cluster_pos.first,
@@ -277,104 +279,124 @@ void media_mkv::process_final() {
             );
             if (cluster == nullptr) {
                 std::cerr << "[SERIOUS ERROR]: Cannot read cluster\n";
-                continue;
+                return process_final_fail();
             }
             cluster->ReadData(m_stream.I_O(), SCOPE_ALL_DATA);
-
-            KaxSimpleBlock* block = FindChild<KaxSimpleBlock>(*cluster);
+            clusterVt.emplace_back(std::move(cluster));
+        
+            KaxSimpleBlock* block = FindChild<KaxSimpleBlock>(*clusterVt.back());
             if (block == nullptr) {
                 std::cerr << "[ CLUSTER " << (i+1) << " ]: Found no SimpleBlock\n";
-                continue;
+                return process_final_fail();
             }
+            blockVt.emplace_back(block);
+            needPacketVt.emplace_back(1);
+        }
+            // if (block->TrackNum() != m_codec_helper.track_number) {
+        // decode each frame
+        std::cerr << " Setting up data \n ";
+        for (int frame_ctr = 0, shouldStop = 0; !shouldStop; ++frame_ctr) {
+            std::cerr << " frame " << frame_ctr << " \n ";
+            for (int i = 0; i < m_cluster_need_size; ++i) {
+                int recv_frame = 0;
+                do {
+                    //std::cerr << "Cluster " << i << "\n";
+                    if (needPacketVt[i]) {
+                        while (blockVt[i] && blockVt[i]->TrackNum() != m_codec_helper.track_number) { // wrong track, try other packet
+                            blockVt[i] = FindNextChild<KaxSimpleBlock>(*clusterVt[i], *blockVt[i]);
+                            if (blockVt[i] == nullptr) { // no more block
+                                break;
+                            }
+                        }
+                        pkt->data = blockVt[i]->GetBuffer(0).Buffer();
+                        pkt->size = blockVt[i]->GetBuffer(0).Size();
+                        //pkt->flags = AV_PKT_FLAG_KEY;
 
-            if (block->TrackNum() != m_codec_helper.track_number) {
-                std::cerr << "[ CLUSTER " << (i+1) << " ]: Wrong track num\n";
-                continue;
-            }
+                        averror_ret = libav::avcodec_send_packet(ctxVt[i].get(), pkt.get());
+                        if (averror_ret < 0) return process_final_fail();
+                        needPacketVt[i] = 0;
+                    }
+                    else {
+                        averror_ret = libav::avcodec_receive_frame(ctxVt[i].get(), frame_video.get());
+                        if (averror_ret == 0) recv_frame = 1;
+                        else if (averror_ret == AVERROR_EOF) { // no more frame
+                            break;
+                        }
+                        else if (averror_ret == AVERROR(EAGAIN)) { // cannot read frame from this packet, send more
+                            blockVt[i] = FindNextChild<KaxSimpleBlock>(*clusterVt[i], *blockVt[i]);
+                            if (blockVt[i] == nullptr) { // no more block
+                                break;
+                            }
+                            needPacketVt[i] = 1;
+                        }
+                    }
+                } while(!recv_frame);
 
-            int error_in_loop = false;
-            do {
-                pkt->data = block->GetBuffer(0).Buffer();
-                pkt->size = block->GetBuffer(0).Size();
-                pkt->flags = AV_PKT_FLAG_KEY; // this is define so no namespace
-
-                if ((averror_ret = 
-                            libav::avcodec_send_packet(ctx.get(), pkt.get())) < 0) {
-                    std::cerr << "[ CLUSTER " << (i+1) << " ]: Cannot send packet\n";
-                    std::cerr << libav_err(averror_ret) << "\n";
-                    error_in_loop = true;
+                if (!recv_frame) {
+                    shouldStop = 1;
                     break;
                 }
-                if ((averror_ret = 
-                            libav::avcodec_receive_frame(ctx.get(), frame_video.get())) < 0) {
-                    if (averror_ret != AVERROR(EAGAIN)) {
-                        std::cerr << "[ CLUSTER " << (i+1) << " ]: Cannot receive frame\n";
-                        std::cerr << " EAGAIN " << (averror_ret == AVERROR(EAGAIN)) << "\n";
-                        std::cerr << libav_err(averror_ret) << "\n";
-                        error_in_loop = true;
-                        break;
-                    }
+
+                std::unique_ptr<struct libav::SwsContext, 
+                    decltype([](struct libav::SwsContext* p) {
+                    libav::sws_freeContext(p);
+                })> sws_ctx(
+                    libav::sws_getContext(frame_video->width, frame_video->height,
+                        (libav::AVPixelFormat)frame_video->format,
+                        frame_rgb->width, frame_rgb->height,
+                        (libav::AVPixelFormat)frame_rgb->format,
+                        SWS_LANCZOS | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND,
+                        NULL, NULL, NULL
+                    )
+                );
+
+                sws_scale(sws_ctx.get(), frame_video->data, frame_video->linesize,
+                    0, frame_video->height,
+                    frame_rgb->data, frame_rgb->linesize);
+
+                int const oh = i / m_grid_size;
+                int const ow = i % m_grid_size;
+                int const linesize = frame_rgb->linesize[0];
+                int const linebigsize = m_codec_helper.pixel_width * 3; // rgb24
+                                                                    //
+                std::uint8_t* frame_src = (std::uint8_t*)frame_rgb->data[0];
+                std::uint8_t* frame_dst = imageData.data() + 
+                    oh * frame_rgb->height * linebigsize + 
+                    ow * linesize;
+                for (int hi = 0; hi < frame_rgb->height; ++hi) {
+                    std::memcpy(frame_dst, frame_src, linesize);
+                    frame_src += linesize;
+                    frame_dst += linebigsize;
                 }
-                KaxSimpleBlock* block = FindNextChild<KaxSimpleBlock>(
-                        *cluster, *block);
-            } while (block != nullptr && averror_ret == AVERROR(EAGAIN));
-            if (error_in_loop) {
-                std::cerr << "[ CLUSTER " << (i+1) << " ]: Cannot get frame from simple block(s)\n";
-                continue;
+
             }
 
-            std::unique_ptr<struct libav::SwsContext, 
-                decltype([](struct libav::SwsContext* p) {
-                libav::sws_freeContext(p);
-            })> sws_ctx(
-                libav::sws_getContext(frame_video->width, frame_video->height,
-                    (libav::AVPixelFormat)frame_video->format,
-                    frame_rgb->width, frame_rgb->height,
-                    (libav::AVPixelFormat)frame_rgb->format,
-                    SWS_LANCZOS | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND,
-                    NULL, NULL, NULL
-                )
+            if (shouldStop) break;
+
+            unsigned char * png_buf; std::size_t png_size;
+            int encode_ret = lodepng::lodepng_encode24(
+                &png_buf, &png_size,
+                imageData.data(),
+                m_codec_helper.pixel_width, m_codec_helper.pixel_height
             );
-            sws_scale(sws_ctx.get(), frame_video->data, frame_video->linesize,
-                0, frame_video->height,
-                frame_rgb->data, frame_rgb->linesize);
-
-            int const oh = i / m_grid_size;
-            int const ow = i % m_grid_size;
-            int const linesize = frame_rgb->linesize[0];
-            int const linebigsize = m_codec_helper.pixel_width * 3; // rgb24
-            std::uint8_t* frame_src = (std::uint8_t*)frame_rgb->data[0];
-            std::uint8_t* frame_dst = imageData.data() + 
-                oh * frame_rgb->height * linebigsize + 
-                ow * linesize;
-            for (int hi = 0; hi < frame_rgb->height; ++hi) {
-                std::memcpy(frame_dst, frame_src, linesize);
-                frame_src += linesize;
-                frame_dst += linebigsize;
+            if (encode_ret) {
+                std::cerr << "ENCODE FAIL\n";
+                std::cerr << "ERROR CODE: " << encode_ret << "\n";
+                return process_final_fail();
             }
+            std::unique_ptr<unsigned char, decltype([](unsigned char* p){
+                free(p);
+            })> png_ptr(png_buf);
+
+            lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
+            std::string fp = fs.file_path(get_file_index());
+            std::string ext = std::format(".{}.png", frame_ctr);
+            std::string fn = lt::aux::to_hex(get_torrent_handle().info_hash()) + "_" +
+                lt::aux::to_hex(lt::hasher(fp.data(), fp.size()).final()) + ext; 
+            write_file(fn, (char*)png_buf, png_size);
         }
 
-        unsigned char * png_buf; std::size_t png_size;
-        int encode_ret = lodepng::lodepng_encode24(
-            &png_buf, &png_size,
-            imageData.data(),
-            m_codec_helper.pixel_width, m_codec_helper.pixel_height
-        );
-        if (encode_ret) {
-            std::cerr << "ENCODE FAIL\n";
-            std::cerr << "ERROR CODE: " << encode_ret << "\n";
-            return process_final_fail();
-        }
-        std::unique_ptr<unsigned char, decltype([](unsigned char* p){
-            free(p);
-        })> png_ptr(png_buf);
         /*
-        lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
-        std::string fp = fs.file_path(get_file_index());
-        std::string fn = lt::aux::to_hex(get_torrent_handle().info_hash()) + "_" +
-            lt::aux::to_hex(lt::hasher(fp.data(), fp.size()).final()) + ".png"; 
-        write_file(fn, (char*)png_buf, png_size);
-        */
         try { // send payload to a discord bot for broadcast
             boost::asio::io_context m_context;
             boost::asio::ip::tcp::socket m_socket(m_context);
@@ -411,6 +433,7 @@ void media_mkv::process_final() {
             std::cerr << "[SERIOUS ERROR]: " << e.what() << std::endl;
             return process_final_fail();
         }
+        */
 
         std::cerr << "[ FINISH GENERATING THUMBNAIL ]\n";
 
