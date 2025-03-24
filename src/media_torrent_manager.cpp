@@ -78,7 +78,7 @@ void media_torrent_manager::handle_loop() {
     auto cur_clock = std::chrono::steady_clock::now();
     for (auto it = m_upload_list.begin(), nx = std::next(it); it != m_upload_list.end(); it = nx) {
         nx = std::next(it);
-        if (cur_clock - it->add_tm > std::chrono::minutes{30}) {
+        if (cur_clock - it->add_tm > std::chrono::minutes{15}) {
             std::cerr << "remove torrent\n";
             m_session.remove_torrent(it->handle);
             m_upload_list.erase(it);
