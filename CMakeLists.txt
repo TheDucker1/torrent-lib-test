@@ -20,6 +20,10 @@ pkg_check_modules( LIBMATROSKA REQUIRED IMPORTED_TARGET
     libebml 
     libmatroska
 )
+pkg_check_modules( LIBWEBP REQUIRED IMPORTED_TARGET
+    libwebp
+    libwebpmux
+)
 
 # Add source to this project's executable.
 add_executable (torrentQuickMediaManager "src/torrentQuickMediaManager.cpp" 
@@ -38,6 +42,7 @@ set_property(TARGET customStorage PROPERTY CXX_STANDARD 20)
 target_include_directories(torrentQuickMediaManager PRIVATE "include")
 target_include_directories(torrentQuickMediaManager PRIVATE "lodepng")
 
+target_link_libraries(torrentQuickMediaManager PRIVATE PkgConfig::LIBWEBP)
 target_link_libraries(torrentQuickMediaManager PRIVATE LibtorrentRasterbar::torrent-rasterbar)
 target_link_libraries(torrentQuickMediaManager PRIVATE PkgConfig::LIBAV)
 target_link_libraries(torrentQuickMediaManager PRIVATE PkgConfig::LIBMATROSKA)

@@ -15,10 +15,65 @@
 #include<libtorrent/libtorrent.hpp>
 
 #include<boost/asio.hpp>
+#include<bit> // C++20
 
 namespace lodepng {
     #include"lodepng.h"
     #include"lodepng.cpp"
+}
+
+namespace libwebp {
+    #include<webp/mux.h>
+    #include<webp/encode.h>
+
+    struct webpAnimEnc {
+        WebPAnimEncoderOptions enc_options;
+        WebPConfig config;
+        WebPPicture frame;
+        WebPData data;
+        WebPAnimEncoder* enc;
+        int frame_cnt;
+
+        webpAnimEnc() : enc(nullptr), frame_cnt(0) {}
+        int init(int width, int height) {
+            if (!WebPAnimEncoderOptionsInit(&enc_options) ||
+                !WebPConfigInit(&config) ||
+                !WebPPictureInit(&frame)) {
+                return 0;
+            }
+            WebPDataInit(&data);
+            enc = WebPAnimEncoderNew(width, height, &enc_options);
+            if (!enc) return 0;
+
+            config.lossless = 0;
+            config.quality = 80;
+            // config.target_size = 0; // discord file limit (10MB so dont need to care)
+
+            frame.width = width;
+            frame.height = height;
+            frame.use_argb = 1;
+            frame.argb_stride = width;
+
+            return 1;
+        }
+        int add_frame(void * data) {
+            frame.argb = (uint32_t*) data;
+            if (!WebPAnimEncoderAdd(enc, &frame, frame_cnt * 41, &config)) return 0;
+            frame_cnt += 1;
+            return 1;
+        }
+        int finalize() {
+            if (!WebPAnimEncoderAdd(enc, NULL, frame_cnt * 41, NULL)) return 0;
+            if (!WebPAnimEncoderAssemble(enc, &data)) return 0;
+            return 1;
+        }
+
+        ~webpAnimEnc() {
+            WebPDataClear(&data);
+            WebPPictureFree(&frame);
+            WebPAnimEncoderDelete(enc);
+        }
+    };
 }
 
 namespace libav {
@@ -170,7 +225,7 @@ void media_mkv::process_final() {
     auto thread_job = [&]()->void{
         std::cerr << "[ START GENERATING THUMBNAIL ]\n";
         std::vector<std::uint8_t> imageData(
-            m_codec_helper.pixel_width * m_codec_helper.pixel_height * 3, '\0'
+            m_codec_helper.pixel_width * m_codec_helper.pixel_height * 4, '\0'
         );
 
         // std::cerr << "[ Set up libav context ]\n";
@@ -250,12 +305,24 @@ void media_mkv::process_final() {
 
         frame_rgb->width = m_codec_helper.pixel_width / m_grid_size;
         frame_rgb->height = m_codec_helper.pixel_height / m_grid_size;
-        frame_rgb->format = libav::AV_PIX_FMT_RGB24;
+        if constexpr (std::endian::native == std::endian::big) {
+            frame_rgb->format = libav::AV_PIX_FMT_ARGB;
+        }
+        else {
+            frame_rgb->format = libav::AV_PIX_FMT_BGRA;
+        }
         libav::av_image_alloc(
             frame_rgb->data, frame_rgb->linesize,
             frame_rgb->width, frame_rgb->height,
             (enum libav::AVPixelFormat)frame_rgb->format, 1
         );
+
+        // webp
+        libwebp::webpAnimEnc webp_enc;
+        if (!webp_enc.init(m_codec_helper.pixel_width, m_codec_helper.pixel_height)) {
+            std::cerr << "[SERIOUS ERROR]: Cannot init webp encoder" << std::endl;
+            return process_final_fail();
+        }
 
         std::vector<codecContextPtr> ctxVt;
         std::vector<std::unique_ptr<KaxCluster>> clusterVt;
@@ -357,7 +424,7 @@ void media_mkv::process_final() {
                 int const oh = i / m_grid_size;
                 int const ow = i % m_grid_size;
                 int const linesize = frame_rgb->linesize[0];
-                int const linebigsize = m_codec_helper.pixel_width * 3; // rgb24
+                int const linebigsize = m_codec_helper.pixel_width * 4; // rgb32
                                                                     //
                 std::uint8_t* frame_src = (std::uint8_t*)frame_rgb->data[0];
                 std::uint8_t* frame_dst = imageData.data() + 
@@ -373,30 +440,25 @@ void media_mkv::process_final() {
 
             if (shouldStop) break;
 
-            unsigned char * png_buf; std::size_t png_size;
-            int encode_ret = lodepng::lodepng_encode24(
-                &png_buf, &png_size,
-                imageData.data(),
-                m_codec_helper.pixel_width, m_codec_helper.pixel_height
-            );
-            if (encode_ret) {
-                std::cerr << "ENCODE FAIL\n";
-                std::cerr << "ERROR CODE: " << encode_ret << "\n";
+            if (!webp_enc.add_frame(imageData.data())) {
+                std::cerr << "[SERIOUS ERROR]: Cannot add frame\n";
                 return process_final_fail();
             }
-            std::unique_ptr<unsigned char, decltype([](unsigned char* p){
-                free(p);
-            })> png_ptr(png_buf);
-
-            lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
-            std::string fp = fs.file_path(get_file_index());
-            std::string ext = std::format(".{}.png", frame_ctr);
-            std::string fn = lt::aux::to_hex(get_torrent_handle().info_hash()) + "_" +
-                lt::aux::to_hex(lt::hasher(fp.data(), fp.size()).final()) + ext; 
-            write_file(fn, (char*)png_buf, png_size);
+        }
+        if (!webp_enc.finalize()) {
+            std::cerr << "[SERIOUS ERROR]: Cannot finalize webp encoding\n";
+            return process_final_fail();
         }
 
         /*
+        lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
+        std::string fp = fs.file_path(get_file_index());
+        std::string ext = std::format(".webp");
+        std::string fn = lt::aux::to_hex(get_torrent_handle().info_hash()) + "_" +
+            lt::aux::to_hex(lt::hasher(fp.data(), fp.size()).final()) + ext; 
+        write_file(fn, (char*)webp_enc.data.bytes, webp_enc.data.size);
+        */
+        
         try { // send payload to a discord bot for broadcast
             boost::asio::io_context m_context;
             boost::asio::ip::tcp::socket m_socket(m_context);
@@ -416,7 +478,7 @@ void media_mkv::process_final() {
             std::uint32_t const filename_size_ = m_filename.size();
             std::uint32_t const filename_size = htonl(filename_size_);
 
-            std::uint32_t const buf_size_ = png_size;
+            std::uint32_t const buf_size_ = webp_enc.data.size;
             //std::uint32_t const buf_size = htonl(buf_size_);
 
             std::uint32_t total_size_ = sizeof(std::uint32_t) + filename_size_ + 
@@ -428,12 +490,12 @@ void media_mkv::process_final() {
             boost::asio::write(m_socket, boost::asio::buffer(&filename_size, 4));
             boost::asio::write(m_socket, boost::asio::buffer(m_filename.data(), filename_size_));
             //boost::asio::write(m_socket, boost::asio::buffer(&buf_size, 4));
-            boost::asio::write(m_socket, boost::asio::buffer(png_buf, buf_size_));
+            boost::asio::write(m_socket, boost::asio::buffer((char*)webp_enc.data.bytes, webp_enc.data.size));
         } catch (std::exception& e) {
             std::cerr << "[SERIOUS ERROR]: " << e.what() << std::endl;
             return process_final_fail();
         }
-        */
+        
 
         std::cerr << "[ FINISH GENERATING THUMBNAIL ]\n";
 
