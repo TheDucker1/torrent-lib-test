@@ -38,10 +38,15 @@ int main(int argc, char* argv[]) try
                 boost::asio::read(m_socket, boost::asio::buffer(&path_length, 4));
                 path_length = ntohl(path_length);
                 std::cerr << path_length << " LEN\n";
-                std::string path_(path_length, '\0');
+                std::vector<char> path_(path_length, '\0');
                 boost::asio::read(m_socket, boost::asio::buffer(path_.data(), path_length));
-                std::cerr << path_ << "\n";
-                manager.add_torrent_download(path_, is_upload);
+                int bufferSize = MultiByteToWideChar(CP_UTF8, 0, path_.data(), -1, NULL, 0);
+                if (bufferSize == 0) return;
+                std::wstring wpath(bufferSize, L'\0');
+                int result = MultiByteToWideChar(CP_UTF8, 0, path_.data(), -1, wpath.data(), bufferSize);
+                if (result == 0) return;
+                if (wpath[wpath.size()-1] == '\0') wpath.resize(wpath.size()-1);
+                manager.add_torrent_download(wpath, is_upload);
             }
         } catch (std::exception& e) {
             shouldStop = true;

@@ -8,6 +8,18 @@ media_torrent_manager::media_torrent_manager(lt::session_params const& ses_param
     m_session(ses_params) {
 }
 
+std::string convert_from_wstring(std::wstring const& s)
+{
+    std::string ret;
+    ret.resize(s.size() * 4 + 1);
+    int size = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1
+        , &ret[0], int(ret.size()), nullptr, nullptr);
+    if (size < 0) return {};
+    if (size > 0 && ret[size - 1] == '\0') --size;
+    ret.resize(size);
+    return ret;
+}
+
 void media_torrent_manager::handle_loop() {
     std::lock_guard<std::mutex> guard(m_mutex);
     std::vector<lt::alert*> alerts;
@@ -125,10 +137,12 @@ void media_torrent_manager::handle_file_add(
 }
 
 void media_torrent_manager::add_torrent_download(
-    std::string const& maybe_magnet_uri_or_torrent_file_path,
+    std::wstring const& maybe_magnet_uri_or_torrent_file_path_,
     int const upload_mode 
     ) {
     std::lock_guard<std::mutex> guard(m_mutex);
+    std::string maybe_magnet_uri_or_torrent_file_path = 
+        convert_from_wstring(maybe_magnet_uri_or_torrent_file_path_);
 
     lt::error_code error;
     lt::add_torrent_params atp = lt::parse_magnet_uri(

@@ -1,9 +1,11 @@
 // tcp client to send .torrent path from taiga to manager
-// g++ ../src/torrentAdder.cpp --static -o torrentAdder.exe -lws2_32
+// g++ ../src/torrentAdder.cpp -mwindows --static -o transmission-remote.exe -lshell32 -lws2_32
 
-#include<string>
 #include<boost/asio.hpp>
 #include<windows.h>
+#include<shellapi.h>
+#include<string>
+
 using boost::asio::ip::tcp;
 
 int WINAPI WinMain(
@@ -14,8 +16,21 @@ int WINAPI WinMain(
     ) {
 
     try {
-    std::string filePath_ = std::string(lpCmdLine);
-    std::string filePath = filePath_.substr(1, filePath_.size()-2); // the path is surrounded by " "
+    LPWSTR *szArgList;
+    int nArgs;
+    szArgList = CommandLineToArgvW(GetCommandLineW(), &nArgs);
+    if (szArgList == 0) return 0;
+    if (nArgs < 2) return 0;
+
+    int bufferSize = WideCharToMultiByte(CP_UTF8, 0, szArgList[1], -1, NULL, 0, NULL, NULL);
+    if (bufferSize == 0) {
+        LocalFree(szArgList);
+        return 0;
+    }
+    std::vector<char> filePath(bufferSize);
+    WideCharToMultiByte(CP_UTF8, 0, szArgList[1], -1, filePath.data(), bufferSize, NULL, NULL);
+    if (filePath.size() && filePath[filePath.size()-1] == '\0') filePath.resize(filePath.size()-1);
+
     boost::asio::io_context m_context;
     tcp::socket m_socket(m_context);
     m_socket.connect(

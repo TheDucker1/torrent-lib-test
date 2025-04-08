@@ -5,10 +5,10 @@ cmake_minimum_required (VERSION 3.17)
 set(CMAKE_CXX_STANDARD 20)  
 
 project ("torrentQuickMediaManager" LANGUAGES C CXX)
-project ("customStorage" LANGUAGES C CXX)
+# project ("customStorage" LANGUAGES C CXX)
 
-find_package(PkgConfig REQUIRED)
 find_package(LibtorrentRasterbar CONFIG REQUIRED)
+find_package(PkgConfig REQUIRED)
 
 pkg_check_modules( LIBAV REQUIRED IMPORTED_TARGET
     libavcodec
@@ -34,20 +34,19 @@ add_executable (torrentQuickMediaManager "src/torrentQuickMediaManager.cpp"
     "src/media_mkv.cpp" 
     "src/media_torrent_manager.cpp"
 )
-add_executable (customStorage "src/custom_storage.cpp")
+# add_executable (customStorage "src/custom_storage.cpp")
 
 set_property(TARGET torrentQuickMediaManager PROPERTY CXX_STANDARD 20)
-set_property(TARGET customStorage PROPERTY CXX_STANDARD 20)
+# set_property(TARGET customStorage PROPERTY CXX_STANDARD 20)
 
 target_include_directories(torrentQuickMediaManager PRIVATE "include")
 target_include_directories(torrentQuickMediaManager PRIVATE "lodepng")
 
 target_link_libraries(torrentQuickMediaManager PRIVATE PkgConfig::LIBWEBP)
-target_link_libraries(torrentQuickMediaManager PRIVATE LibtorrentRasterbar::torrent-rasterbar)
 target_link_libraries(torrentQuickMediaManager PRIVATE PkgConfig::LIBAV)
 target_link_libraries(torrentQuickMediaManager PRIVATE PkgConfig::LIBMATROSKA)
+target_link_libraries(torrentQuickMediaManager PRIVATE LibtorrentRasterbar::torrent-rasterbar)
 
-target_link_libraries(customStorage PRIVATE LibtorrentRasterbar::torrent-rasterbar)
-
+# target_link_libraries(customStorage PRIVATE LibtorrentRasterbar::torrent-rasterbar)
 
 # TODO: Add tests and install targets if needed.

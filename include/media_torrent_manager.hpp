@@ -8,7 +8,7 @@
 struct media_torrent_manager { 
     media_torrent_manager(lt::session_params const&);
 
-    void add_torrent_download(std::string const&, int const = 0);
+    void add_torrent_download(std::wstring const&, int const = 0);
     void handle_loop();
 
 private:
