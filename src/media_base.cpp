@@ -1,11 +1,12 @@
 #include"media_base.hpp"
+#include<atomic>
 
 media_base::media_base(
     lt::torrent_handle const handle,
     lt::file_index_t const file_index
 ) : m_set_handle(true),
     m_last_receive(std::chrono::steady_clock::now()),
-    m_mode(media_action_mode::INIT),
+    m_mode(media_action_mode::ACTIVE),
     m_handle(handle),
     m_file_index(file_index)
 {
@@ -14,6 +15,10 @@ media_base::media_base(
     m_file_offset_in_torrent = fs.file_offset(get_file_index());
     m_file_size_in_torrent = fs.file_size(get_file_index());
 
+}
+
+void media_base::force_fail() {
+    process_final_fail();
 }
 
 void media_base::update_last_receive_to_now() {
@@ -27,9 +32,7 @@ void media_base::check_last_receive_with_now() {
     if (is_busy()) return;
     if (is_finish()) return;
     auto current_clock = std::chrono::steady_clock::now();
-    // it has been 10 seconds since we receive any new piece (~1MB?)
-    // request them again [TODO]
-    if ((current_clock - m_last_receive) > std::chrono::seconds{10}) {
+    if ((current_clock - m_last_receive) > std::chrono::seconds{15}) {
         request_awaiting_pieces();
     }
 }
@@ -41,33 +44,48 @@ void media_base::receive_piece(
     if (!m_set_handle) return;
     if (is_busy()) return;
 
-    auto it = m_awaiting_pieces.find(piece_index);
-    if (it == m_awaiting_pieces.end()) return;
+    auto it1 = m_piece_data.find(piece_index);
+    if (it1 == m_piece_data.end()) m_piece_data[piece_index] = std::make_pair(buf_ptr, buf_size);
 
-    m_awaiting_pieces.erase(it);
-    m_piece_data[piece_index] = std::make_pair(buf_ptr, buf_size);
+    for (auto it = m_awaiting_pieces.find(piece_index); it != m_awaiting_pieces.end();
+            it = m_awaiting_pieces.find(piece_index)) {
+        it->second(piece_index);
+        m_awaiting_pieces.erase(it);
+    }
+
     update_last_receive_to_now();
 }
 
-void media_base::set_receive_pieces(
-    std::vector<lt::piece_index_t> const& pieces_list
-) {
+void media_base::set_receive_piece(lt::piece_index_t piece_index, on_piece_specific_callback_type cb) {
     if (!m_set_handle) return;
-    if (is_busy()) return;
     if (is_finish()) return;
-    // either this or clear all awaiting pieces, test later
-    if (m_awaiting_pieces.size()) return;
 
-    for (lt::piece_index_t i: pieces_list) {
-        // check for piece existance
-        auto it = m_piece_data.find(i);
-        if (it != m_piece_data.end()) continue;
-
-        m_awaiting_pieces.insert(i);
-        get_torrent_handle().piece_priority(i, lt::default_priority);
-        //std::cerr << "PRIORITIZE PIECE [" << i << "] WITH PRIORITY " << lt::default_priority << std::endl;
-    }
+    m_awaiting_pieces.emplace(piece_index, cb);
+    get_torrent_handle().piece_priority(piece_index, lt::default_priority);
     update_last_receive_to_now();
+}
+void media_base::set_receive_pieces(std::vector<lt::piece_index_t> const _pieces_list,
+        on_multi_pieces_callback_type cb) {
+    struct Wrapper{
+        std::atomic<int> received_cnt;
+        int expected_cnt;
+        std::vector<lt::piece_index_t> pieces_list;
+
+        Wrapper(std::vector<lt::piece_index_t> const& _pieces_list) {
+            pieces_list = _pieces_list;
+            received_cnt = 0;
+            expected_cnt = static_cast<int>(pieces_list.size());
+        }
+    };
+    auto state = std::make_shared<Wrapper>(_pieces_list); 
+    for (lt::piece_index_t piece_index: state->pieces_list) {
+        set_receive_piece(piece_index, [state, cb](lt::piece_index_t _) {
+            int prev = state->received_cnt.fetch_add(1);
+            if (prev+1 == state->expected_cnt) {
+                cb(state->pieces_list);
+            }
+        });
+    }
 }
 
 std::vector<lt::piece_index_t> 
@@ -98,11 +116,6 @@ std::pair<boost::shared_array<char>, int>
         nullptr, -1
     };
 
-    // receiving piece (unlikely) would mess up iterator finding
-    if (m_awaiting_pieces.size()) return {
-        nullptr, -1
-    };
-
     lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
 
     TORRENT_ASSERT(offset < file_size_in_torrent());
@@ -120,21 +133,15 @@ void media_base::process() {
     if (!m_set_handle) return;
 
     // still has job to do
-    if (m_awaiting_pieces.size()) {
+    if (m_mode == media_action_mode::ACTIVE) {
+        process_active();
         check_last_receive_with_now();
         return;
-    }
-                                          
-    // or big switch table instead
-    if (m_mode == media_action_mode::INIT) {
-        m_mode = media_action_mode::READY;
-    }
-    else if (m_mode == media_action_mode::READY) {
-        process_ready();
     }
     else if (m_mode == media_action_mode::CAN_FINISH) {
         m_mode = media_action_mode::TRY_TO_FINISH;
         process_final();
+        return;
     }
     else if (m_mode == media_action_mode::TRY_TO_FINISH) {
         // nothing
@@ -151,7 +158,7 @@ void media_base::request_awaiting_pieces() {
     if (!m_set_handle) return;
     if (is_busy()) return;
     if (is_finish()) return;
-    for (lt::piece_index_t i: m_awaiting_pieces) {
+    for (const auto [i, cb]: m_awaiting_pieces) {
 
         // only request when we have it
         if (get_torrent_handle().have_piece(i))

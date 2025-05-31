@@ -6,11 +6,6 @@
 #define MEDIA_TORRENT_MANAGER_H_
 
 struct media_torrent_manager { 
-    media_torrent_manager(lt::session_params const&);
-
-    void add_torrent_download(std::string const&, int const = 0);
-    void handle_loop();
-
 private:
     struct sha1comparator {
         bool operator()(lt::sha1_hash const& a, lt::sha1_hash const& b) const {
@@ -20,16 +15,34 @@ private:
             return false; // a == b --> (a<b) == false 
         }
     };
-    struct upload_manager {
-        upload_manager(lt::torrent_handle h) : handle(h),
-            add_tm(std::chrono::steady_clock::now()) {
-                handle.set_flags(lt::torrent_flags::share_mode);
-            }
+    struct handle_manager {
+        handle_manager() : handle(lt::torrent_handle()), last_upd(std::chrono::steady_clock::now()) {}
+        handle_manager(lt::torrent_handle h) : handle(h),
+            last_upd(std::chrono::steady_clock::now()) {
+        }
+        void set_download() {
+            if (!handle.is_valid()) return;
+            handle.unset_flags(lt::torrent_flags::upload_mode);
+            is_uploading = 0;
+        }
+        void set_upload() {
+            if (!handle.is_valid()) return;
+            if (is_uploading) return;
+            is_uploading = 1;
+            handle.unset_flags(lt::torrent_flags::auto_managed);
+            handle.set_flags(lt::torrent_flags::upload_mode); 
+        }
+        void update() {
+            last_upd = std::chrono::steady_clock::now();
+        }
+        int is_uploading = 0;
         lt::torrent_handle handle;
         std::chrono::time_point<
-            std::chrono::steady_clock> add_tm;
+            std::chrono::steady_clock
+        > last_upd;
     };
 
+    void set_handler_manager(lt::torrent_handle const& h);
     void handle_torrent_add(lt::torrent_handle const& h);
     void handle_file_add(
         lt::torrent_handle const& h,
@@ -43,18 +56,22 @@ private:
         int const piece_size);
 
     bool is_support_media(std::string const& sv) const;
-    void check_resume_data(lt::torrent_handle const &th);
 
     lt::session m_session;
-    std::string m_save_path = "./";
-
+    handle_manager m_current_handle;
     std::list<std::unique_ptr<media_base>> m_media_list;
-    std::map<lt::sha1_hash, int, sha1comparator> m_file_counter;
-    std::set<lt::sha1_hash, sha1comparator> m_pending_update;
-    std::list<lt::torrent_handle> m_active_list;
-    std::list<upload_manager> m_upload_list;
+    std::list<lt::torrent_handle> m_pending_list;
     std::mutex m_mutex;
-    
+
+public:
+    media_torrent_manager(lt::session_params const&);
+
+    void apply_settings (lt::settings_pack const& sp) {return m_session.apply_settings(sp);};
+    void add_torrent_download(std::string const&);
+    std::chrono::time_point<std::chrono::steady_clock> get_last_upd() {
+        return m_current_handle.last_upd;
+    }
+    void handle_loop();
 };
 
 #endif // MEDIA_TORRENT_MANAGER_H_

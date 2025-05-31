@@ -1,6 +1,8 @@
 #include<libtorrent/libtorrent.hpp>
 #include<utility>
 #include<functional>
+#include<map>
+#include<chrono>
 
 #ifndef MEDIA_BASE_H_
 #define MEDIA_BASE_H_
@@ -12,6 +14,7 @@ struct media_base {
     ); 
     ~media_base() = default;
 
+    void force_fail();
     bool is_finish() const;
     bool is_busy() const;
     void receive_piece(lt::piece_index_t,
@@ -24,13 +27,22 @@ struct media_base {
 
 protected:
 
+    using on_piece_specific_callback_type = std::function<void(
+            lt::piece_index_t const 
+        )>;
+    using on_multi_pieces_callback_type = std::function<void(
+            std::vector<lt::piece_index_t> const&
+        )>;
+    void set_receive_piece(lt::piece_index_t piece_index, on_piece_specific_callback_type cb);
+    void set_receive_pieces(std::vector<lt::piece_index_t> const pieces_list, on_multi_pieces_callback_type cb);
+
     void process_final_ready();
     void process_final_retry();
     void process_final_fail();
     void process_final_success();
 
     // subclasses handle the gathering data state machine themselves
-    virtual void process_ready()=0;
+    virtual void process_active()=0;
     // this should spawn a new thread to process data
     // call process_final_fail to reset mode back to CAN_FINISH
     // call process_final_success to set mode to FINISH
@@ -48,15 +60,13 @@ protected:
     std::int64_t file_offset_in_torrent() const { return m_file_offset_in_torrent; }
     std::int64_t file_size_in_torrent() const { return m_file_size_in_torrent; }
 
-    void set_receive_pieces(std::vector<lt::piece_index_t> const& pieces_list);
     void request_awaiting_pieces();
 
 private:
     enum class media_action_mode : std::uint8_t {
-        INIT = 0,          // just create
-        READY,             // gathering data, subclasses need to handle this themselves
-        CAN_FINISH,        // have enough data to generate what we want (e.g. thumbnail)
-        TRY_TO_FINISH,     // currently spawned another thread to finish the job
+        ACTIVE,            // gathering data, for whatever reason
+        CAN_FINISH,        // immediate, for loop handle repeat call finish
+        TRY_TO_FINISH,        // immediate, for loop handle repeat call finish
         FINISH,            // done, safe to delete now 
         FAIL               // for some reason, the job fail, safe to delete now
     };
@@ -67,7 +77,7 @@ private:
     media_action_mode m_mode; // current mode
     lt::torrent_handle const m_handle; // handle to torrent
     lt::file_index_t const m_file_index; // which file
-    std::set<lt::piece_index_t> m_awaiting_pieces; // trigger the callback when empty
+    std::multimap<lt::piece_index_t, on_piece_specific_callback_type> m_awaiting_pieces; // trigger the callback when empty
     std::map<lt::piece_index_t, std::pair<boost::shared_array<char>, int>>
         m_piece_data;
 

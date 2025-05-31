@@ -1,21 +1,13 @@
-// tcp client to send .torrent path from taiga to manager
-// g++ ../src/torrentAdder.cpp --static -o torrentAdder.exe -lws2_32
-
 #include<string>
+#include<utility>
 #include<boost/asio.hpp>
-#include<windows.h>
 using boost::asio::ip::tcp;
 
-int WINAPI WinMain(
-    HINSTANCE hInstance,
-    HINSTANCE hPrevInstance,
-    LPSTR lpCmdLine,
-    int nCmdShow
-    ) {
+int main(int argc, const char* argv[]) {
+    if (argc != 2) return 1;
 
     try {
-    std::string filePath_ = std::string(lpCmdLine);
-    std::string filePath = filePath_.substr(1, filePath_.size()-2); // the path is surrounded by " "
+    std::string filepath = std::string(argv[1]);
     boost::asio::io_context m_context;
     tcp::socket m_socket(m_context);
     m_socket.connect(
@@ -23,14 +15,12 @@ int WINAPI WinMain(
             1205)
     );
 
-    std::uint32_t filePathSize_ = filePath.size();
-    char isUpdate = 0;
-    std::uint32_t filePathSize = ntohl(filePathSize_);
+    std::uint32_t filepathsize_ = filepath.size();
+    std::uint32_t filepathsize = ntohl(filepathsize_);
 
-    std::vector<char> payload(1 + 4 + filePathSize);
-    payload[0] = isUpdate;
-    std::memcpy(payload.data()+1, &filePathSize, 4);
-    std::memcpy(payload.data()+5, filePath.data(), filePathSize_);
+    std::vector<char> payload(4 + filepathsize);
+    std::memcpy(payload.data(), &filepathsize, 4);
+    std::memcpy(payload.data()+4, filepath.data(), filepathsize_);
 
     boost::asio::write(m_socket, boost::asio::buffer(payload.data(), payload.size()));
     } catch (std::exception& e) {
@@ -39,4 +29,5 @@ int WINAPI WinMain(
 
 
     return 0;
+
 }

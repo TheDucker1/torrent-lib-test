@@ -1,5 +1,4 @@
 #include"media_torrent_manager.hpp"
-#include"media_test.hpp"
 #include"media_mkv.hpp"
 #include<filesystem>
 #include<fstream>
@@ -9,12 +8,13 @@ media_torrent_manager::media_torrent_manager(lt::session_params const& ses_param
 }
 
 void media_torrent_manager::handle_loop() {
-    std::lock_guard<std::mutex> guard(m_mutex);
     std::vector<lt::alert*> alerts;
     m_session.pop_alerts(&alerts);
 
+    {
+    std::lock_guard<std::mutex> guard(m_mutex);
     for (lt::alert const* al : alerts) {
-        std::cerr << "[AL MSG]: " << al->message() << std::endl;
+        // std::cerr << "[AL MSG]: " << al->message() << std::endl;
         if (auto add_al = lt::alert_cast<lt::add_torrent_alert>(al)) {
             if (add_al->error) {
                 // error in adding, skip torrent
@@ -29,11 +29,17 @@ void media_torrent_manager::handle_loop() {
             handle_torrent_add(meta_rec_al->handle);
         }
         if (auto piece_fin_al = lt::alert_cast<lt::piece_finished_alert>(al)) {
+            std::cerr << "FINISHE PIECE " << piece_fin_al->piece_index << "\n";
+            if (piece_fin_al->handle == m_current_handle.handle)
+                m_current_handle.update();
             piece_fin_al->handle.read_piece(piece_fin_al->piece_index);
         }
         if (auto piece_read_al = lt::alert_cast<lt::read_piece_alert>(al)) {
             if (!piece_read_al->error) {
                 std::cerr << "RECEIVE PIECE " << piece_read_al->piece << "\n";
+                if (piece_read_al->handle == m_current_handle.handle)
+                    m_current_handle.update();
+
                 handle_piece_receive(
                     piece_read_al->handle,
                     piece_read_al->piece,
@@ -52,36 +58,45 @@ void media_torrent_manager::handle_loop() {
             std::cerr << "IO ERROR AT FILE " << std::string(file_err_al->filename()) << " YY\n";
         }
     }
+    }
 
+    if (!m_current_handle.handle.is_valid() && m_pending_list.size() && m_pending_list.front().is_valid()) {
+        set_handler_manager(m_pending_list.front()); // make sure the old file already got flush
+        m_pending_list.pop_front();
+    }
     for (auto& media: m_media_list) {
         media->process();
     }
     for (auto it = m_media_list.begin(), nx = std::next(it); it != m_media_list.end(); it = nx) {
         nx = std::next(it);
-        if ((*it)->is_finish()) {
-            m_file_counter[(*it)->get_torrent_handle().info_hash()] -= 1;
+        if (it->get()->is_finish()) {
+            m_current_handle.update();
             m_media_list.erase(it);
         }
     }
+    if (m_media_list.empty()) {
+        m_current_handle.set_upload();
 
-    for (auto it = m_active_list.begin(), nx = std::next(it); it != m_active_list.end(); it = nx) {
-        nx = std::next(it);
-        if (m_file_counter[it->info_hash()] == 0) {
-            m_file_counter.erase(it->info_hash());
-            m_upload_list.emplace_back(*it);
-            it->set_flags(lt::torrent_flags::upload_mode);
-
-            m_active_list.erase(it);
+        if (m_current_handle.handle.is_valid()) {
+            lt::torrent_status cur_stat = m_current_handle.handle.status(lt::torrent_handle::status_flags_t(0));
+            // std::cerr << cur_stat.all_time_upload << " / " << cur_stat.all_time_download << "\n";
+            if (cur_stat.all_time_upload > cur_stat.all_time_download * 3 / 2) { // sufficient uploading
+                    // thumbnail ~100MB -> should not overflow
+                std::cerr << "remove torrent\n";
+                m_session.remove_torrent(m_current_handle.handle);
+            }
         }
     }
 
+
     auto cur_clock = std::chrono::steady_clock::now();
-    for (auto it = m_upload_list.begin(), nx = std::next(it); it != m_upload_list.end(); it = nx) {
-        nx = std::next(it);
-        if (cur_clock - it->add_tm > std::chrono::minutes{30}) {
+    if (cur_clock - m_current_handle.last_upd >= std::chrono::minutes{15}) { // time out
+        for (auto it = m_media_list.begin(); it != m_media_list.end(); ++it) {
+            it->get()->force_fail();
+        }
+        if (m_current_handle.handle.is_valid()) {
             std::cerr << "remove torrent\n";
-            m_session.remove_torrent(it->handle);
-            m_upload_list.erase(it);
+            m_session.remove_torrent(m_current_handle.handle);
         }
     }
 };
@@ -91,18 +106,14 @@ void media_torrent_manager::handle_torrent_add(lt::torrent_handle const& h) {
     if (h.torrent_file() == nullptr) {
         return;
     }
+    std::cerr << "ADDED NEW TORRENT\n";
     h.unset_flags(lt::torrent_flags::auto_managed);
-    check_resume_data(h);
-    h.unset_flags(lt::torrent_flags::upload_mode);
-
-    auto it = m_pending_update.find(h.info_hash());
-    if (it != m_pending_update.end()) {
-        m_upload_list.emplace_back(h);
-        m_pending_update.erase(it);
-        return;
-    }
-
-    m_active_list.emplace_back(h);
+    h.set_flags(lt::torrent_flags::upload_mode);
+    m_pending_list.emplace_back(h);
+}
+void media_torrent_manager::set_handler_manager(lt::torrent_handle const& h) {
+    if (m_current_handle.handle.is_valid()) return; // don't remove a valid handle
+    m_current_handle = handle_manager(h);
     std::shared_ptr<lt::torrent_info const> ti = h.torrent_file();
     lt::file_storage const& fs = ti->files();
     for (lt::file_index_t i: fs.file_range()) {
@@ -110,8 +121,9 @@ void media_torrent_manager::handle_torrent_add(lt::torrent_handle const& h) {
         std::string sv(fs.file_name(i));
         if (!is_support_media(sv)) continue;
         handle_file_add(h, i, sv);
-        m_file_counter[h.info_hash()] += 1;
     }
+    m_current_handle.set_download();
+
 }
 void media_torrent_manager::handle_file_add(
     lt::torrent_handle const& h,
@@ -120,15 +132,12 @@ void media_torrent_manager::handle_file_add(
 ) {
     std::cerr << "ADDED FILE [ " << fn << " ] to manager" << std::endl;
 
-    // based on file name, choose appropriate type
     m_media_list.emplace_back(std::make_unique<media_mkv>(h, index));
 }
 
 void media_torrent_manager::add_torrent_download(
-    std::string const& maybe_magnet_uri_or_torrent_file_path,
-    int const upload_mode 
+    std::string const& maybe_magnet_uri_or_torrent_file_path
     ) {
-    std::lock_guard<std::mutex> guard(m_mutex);
 
     lt::error_code error;
     lt::add_torrent_params atp = lt::parse_magnet_uri(
@@ -154,69 +163,14 @@ void media_torrent_manager::add_torrent_download(
         }
     }
 
-    if (upload_mode) {
-        if (is_magnet) m_pending_update.insert(atp.info_hashes.get(lt::protocol_version::V1));
-        else m_pending_update.insert(atp.ti->info_hash());
-    }
-
-
-    atp.save_path = m_save_path; // default save location
     atp.flags = lt::torrent_flags::default_dont_download |
         lt::torrent_flags::upload_mode; 
+    atp.flags &= ~lt::torrent_flags::auto_managed; // make sure to clear the flag
     atp.piece_priorities = 
         std::vector<lt::download_priority_t>(1, lt::dont_download);
+    std::lock_guard<std::mutex> guard(m_mutex);
     m_session.async_add_torrent(atp);
     return;
-}
-
-// or save and load a fast resume file, which is better
-void media_torrent_manager::check_resume_data(lt::torrent_handle const &th) {
-    std::string const th_save_name("." + 
-            lt::aux::to_hex(th.info_hash()) + ".pieceset"); 
-
-    std::filesystem::path fpth = std::filesystem::path(m_save_path) / 
-            std::filesystem::path(th_save_name);
-    std::ios::openmode mode_ = std::ios::binary | std::ios::in;
-
-    std::fstream save_f(fpth, mode_);
-    std::cerr << "Path: " << fpth << "\n";
-    if (save_f.fail()) {
-        std::cerr << " FOUND NO RESUME FILE \n";
-        return;
-    }
-
-    std::vector<char> header(1024, '\0');
-	char* ptr = header.data();
-    char const* end_ptr = header.data() + header.size();
-    save_f.read(header.data(), header.size());
-    if (save_f.gcount() != 1024) return;
-    std::int32_t const num_piece = lt::aux::read_int32(ptr);
-    std::int32_t const piece_size = lt::aux::read_int32(ptr);
-    std::vector<lt::piece_index_t> used_piece;
-	for (int i = 0; i < num_piece; ++i) {
-        if (ptr == end_ptr) {
-            ptr = header.data();
-            int byte_to_read = std::min(num_piece - i, 1024);
-            save_f.read(header.data(), byte_to_read);
-            if (save_f.gcount() != byte_to_read) {
-                return;
-            }
-        }
-		std::int8_t const used(lt::aux::read_int8(ptr));
-		if (used) {
-            used_piece.emplace_back(lt::piece_index_t(i));
-        }
-	}
-    lt::file_storage const& fs = th.torrent_file()->files();
-    std::vector<char> piece_data(fs.piece_length());
-    for (lt::piece_index_t i : used_piece) {
-        int this_piece_size = fs.piece_size(i);
-        save_f.read(piece_data.data(), piece_data.size());
-        if (save_f.gcount() != piece_data.size()) return;
-        std::cerr << "[ADD PIECE " << i << "]\n";
-        th.add_piece(i, piece_data.data());
-        th.piece_priority(i, lt::default_priority);
-    }
 }
 
 void media_torrent_manager::handle_piece_receive(
@@ -225,18 +179,15 @@ void media_torrent_manager::handle_piece_receive(
     boost::shared_array<char> const piece_buffer,
     int const piece_size
 ) {
-
     for (auto& media : m_media_list) {
         if (media->get_torrent_handle() != handle) continue;
         media->receive_piece(idx, piece_buffer, piece_size);
     }
 }
 
-// only use filename, so make sure we have valid data
 bool media_torrent_manager::is_support_media(
         std::string const& fn) const {
 
     if (fn.ends_with(".mkv")) return true;
-
     return false;
 }

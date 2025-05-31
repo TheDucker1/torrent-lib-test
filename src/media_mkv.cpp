@@ -16,6 +16,8 @@
 
 #include<boost/asio.hpp>
 
+#include"media_send_socket.hpp"
+
 namespace lodepng {
     #include"lodepng.h"
     #include"lodepng.cpp"
@@ -368,47 +370,11 @@ void media_mkv::process_final() {
         std::unique_ptr<unsigned char, decltype([](unsigned char* p){
             free(p);
         })> png_ptr(png_buf);
-        /*
+
         lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
-        std::string fp = fs.file_path(get_file_index());
-        std::string fn = lt::aux::to_hex(get_torrent_handle().info_hash()) + "_" +
-            lt::aux::to_hex(lt::hasher(fp.data(), fp.size()).final()) + ".png"; 
-        write_file(fn, (char*)png_buf, png_size);
-        */
-        try { // send payload to a discord bot for broadcast
-            boost::asio::io_context m_context;
-            boost::asio::ip::tcp::socket m_socket(m_context);
+        lt::string_view const m_filename = fs.file_name(get_file_index());
 
-            m_socket.connect(
-                boost::asio::ip::tcp::endpoint(
-                    boost::asio::ip::make_address("127.0.0.1"),
-                    8890)
-            );
-
-            std::uint32_t const serv_type_ = 2;
-            std::uint32_t const serv_type = htonl(serv_type_);
-
-            lt::file_storage const& fs = get_torrent_handle().torrent_file()->files();
-            lt::string_view const m_filename = fs.file_name(get_file_index());
-
-            std::uint32_t const filename_size_ = m_filename.size();
-            std::uint32_t const filename_size = htonl(filename_size_);
-
-            std::uint32_t const buf_size_ = png_size;
-            //std::uint32_t const buf_size = htonl(buf_size_);
-
-            std::uint32_t total_size_ = sizeof(std::uint32_t) + filename_size_ + 
-                            buf_size_;
-            std::uint32_t total_size = htonl(total_size_);
-
-            boost::asio::write(m_socket, boost::asio::buffer(&serv_type, 4));
-            boost::asio::write(m_socket, boost::asio::buffer(&total_size, 4));
-            boost::asio::write(m_socket, boost::asio::buffer(&filename_size, 4));
-            boost::asio::write(m_socket, boost::asio::buffer(m_filename.data(), filename_size_));
-            //boost::asio::write(m_socket, boost::asio::buffer(&buf_size, 4));
-            boost::asio::write(m_socket, boost::asio::buffer(png_buf, buf_size_));
-        } catch (std::exception& e) {
-            std::cerr << "[SERIOUS ERROR]: " << e.what() << std::endl;
+        if (!write_data_to_activation_socket(m_filename, png_ptr.get(), png_size)) {
             return process_final_fail();
         }
 
@@ -420,26 +386,18 @@ void media_mkv::process_final() {
     t.detach();
 }
 
-void media_mkv::process_ready() {
+void media_mkv::process_active() {
     if (m_cur_mode == mode::READY) {
+        m_cur_mode = mode::IGNORE;
         m_search_length = 1024*1024;
-        m_cur_mode = mode::FINDING_SEEKHEAD;
-        set_receive_pieces(map_byte_range(0, m_search_length));
-    }
-    else if (m_cur_mode == mode::FINDING_SEEKHEAD) {
-        handle_find_seekhead();
-    }
-    else if (m_cur_mode == mode::GET_SEEKHEAD) {
-        handle_get_seekhead();
-    }
-    else if (m_cur_mode == mode::GET_CUE_AND_TRACK_HEAD) {
-        handle_cue_and_track_head();
-    }
-    else if (m_cur_mode == mode::GET_CUE_AND_TRACK_DATA) {
-        handle_cue_and_track_data();
-    }
-    else if (m_cur_mode == mode::GET_CLUSTER_HEAD) {
-        handle_cluster_head();
+        set_receive_pieces(map_byte_range(0, m_search_length), [&](
+                std::vector<lt::piece_index_t> const& vt
+            ) {
+            if (!handle_find_seekhead()) {
+                extend_search_head();
+                m_cur_mode = mode::READY;
+            }
+        });
     }
     else if (m_cur_mode == mode::FINAL) {
         return process_final_ready();
@@ -451,11 +409,9 @@ void media_mkv::extend_search_head() {
     if (m_search_length > m_search_head_limit) {
         return process_final_fail();
     }
-    std::cerr << "[CURRENT SEARCH LENGTH]: " << (m_search_length / 1024/1024) << " MB" << std::endl;
-    set_receive_pieces(map_byte_range(0, m_search_length));
 }
 
-void media_mkv::handle_find_seekhead() {
+bool media_mkv::handle_find_seekhead() {
     //theoretically, there could be multiple [head/segment], but we parse the first one only
     if (!m_found_segment) { // find segment first, since everything are offset to segment
         m_stream.I_O().setFilePointer(0, seek_mode::seek_beginning);
@@ -466,7 +422,7 @@ void media_mkv::handle_find_seekhead() {
         if (ebmlHead == nullptr) {
             std::cerr << "[SERIOUS ERROR]: NOT AN EBML DOCUMENT" << std::endl;
             process_final_fail();
-            return;
+            return false;
         }
         ebmlHead->SkipData(m_stream, EBML_CLASS_CONTEXT(EbmlHead));
 
@@ -477,7 +433,7 @@ void media_mkv::handle_find_seekhead() {
             // we presearch 1MB, so must found
             std::cerr << "[SERIOUS ERROR]: NOT AN EBML DOCUMENT" << std::endl;
             process_final_fail();
-            return;
+            return false;
         }
         m_segment_pos = std::make_pair(
                 kaxSegment->GetElementPosition(),
@@ -494,16 +450,18 @@ void media_mkv::handle_find_seekhead() {
             m_stream.FindNextElement(EBML_CLASS_CONTEXT(KaxSeekHead), upper_elm, -1, false, -1)
         );
         if (kaxSeekHead == nullptr) {
-            return extend_search_head();
+            extend_search_head();
+            return false;
         }
         m_seekhead_pos = std::make_pair(
                 kaxSeekHead->GetElementPosition(),
                 m_stream.I_O().getFilePointer()
         );
 
-        m_cur_mode = mode::GET_SEEKHEAD;
-        set_receive_pieces(map_byte_range(m_seekhead_pos.second, kaxSeekHead->GetSize()));
+        set_receive_pieces(map_byte_range(m_seekhead_pos.second, kaxSeekHead->GetSize()), [&]
+                (std::vector<lt::piece_index_t> const& _) {handle_get_seekhead();});
     }
+    return true;
 }
 
 void media_mkv::handle_get_seekhead() {
@@ -563,8 +521,7 @@ void media_mkv::handle_get_seekhead() {
     std::vector<lt::piece_index_t> track_first = map_byte_range(m_track_pos.first, 20);
     cue_first.insert(cue_first.end(), track_first.begin(), track_first.end());
 
-    set_receive_pieces(cue_first);
-    m_cur_mode = mode::GET_CUE_AND_TRACK_HEAD;
+    set_receive_pieces(cue_first, [&](std::vector<lt::piece_index_t> const& _) {handle_cue_and_track_head();});
 }
 
 void media_mkv::handle_cue_and_track_head() {
@@ -596,8 +553,7 @@ void media_mkv::handle_cue_and_track_head() {
 
     cue_second.insert(cue_second.end(), track_second.begin(), track_second.end());
 
-    set_receive_pieces(cue_second);
-    m_cur_mode = mode::GET_CUE_AND_TRACK_DATA;
+    set_receive_pieces(cue_second, [&](std::vector<lt::piece_index_t>const & _) {handle_cue_and_track_data();});
 }
 
 void media_mkv::handle_cue_and_track_data() {
@@ -662,7 +618,6 @@ void media_mkv::handle_cue_and_track_data() {
                     return process_final_fail();
                 }
                 m_codec_helper.codec_id = kaxCodecId->GetValue();
-                // TODO ff_mkv_codec_tags matroska.h libav conversion
 
                 KaxCodecPrivate* kaxCodecPrivate = FindChild<KaxCodecPrivate>(*track_entry);
                 if (kaxCodecPrivate) {
@@ -746,37 +701,31 @@ void media_mkv::handle_cue_and_track_data() {
     }
 
     std::vector<lt::piece_index_t> cluster_one;
+    m_cluster_processed = 0;
 
-    for (auto const& x: m_cluster_list) {
+    for (auto & cluster: m_cluster_list) {
         std::vector<lt::piece_index_t> cl =
-            map_byte_range(x.m_cluster_pos.first, 20);
-        cluster_one.insert(cluster_one.end(), cl.begin(), cl.end());
+            map_byte_range(cluster.m_cluster_pos.first, 20);
+        //cluster_one.insert(cluster_one.end(), cl.begin(), cl.end());
+
+
+        set_receive_pieces(cl, [&](std::vector<lt::piece_index_t> const& vt) {
+            m_stream.I_O().setFilePointer(cluster.m_cluster_pos.first, seek_mode::seek_beginning);
+            std::unique_ptr<EbmlElement> kaxCluster(m_stream.FindNextID(EBML_INFO(KaxCluster), -1));
+            if (kaxCluster == nullptr) {
+                std::cerr << "[SERIOUS ERROR]: Not Cluster\n";
+                return process_final_fail();
+            }
+            cluster.m_cluster_pos.second = m_stream.I_O().getFilePointer();
+
+            std::vector<lt::piece_index_t> cl2 = map_byte_range(cluster.m_cluster_pos.second, kaxCluster->GetSize());
+            set_receive_pieces(cl2, [&](std::vector<lt::piece_index_t> const& vt2) {
+                m_cluster_processed += 1; // this call is sequential (should be) so shouldn't cause race cond
+                if (m_cluster_processed == m_cluster_need_size) {
+                    m_cur_mode = mode::FINAL;
+                }
+            });
+        });
     }
 
-    set_receive_pieces(cluster_one);
-    m_cur_mode = mode::GET_CLUSTER_HEAD;
-}
-
-void media_mkv::handle_cluster_head() {
-    std::vector<lt::piece_index_t> cluster_two;    
-    for (auto& cluster: m_cluster_list) {
-        m_stream.I_O().setFilePointer(cluster.m_cluster_pos.first, 
-                seek_mode::seek_beginning);
-        std::unique_ptr<EbmlElement> kaxCluster(
-            m_stream.FindNextID(EBML_INFO(KaxCluster), -1)
-        );
-        if (kaxCluster == nullptr) {
-            std::cerr << "[SERIOUS ERROR]: Not Cluster\n";
-            return process_final_fail();
-        }
-        cluster.m_cluster_pos.second = m_stream.I_O().getFilePointer();
-
-        std::vector<lt::piece_index_t> cl =
-            map_byte_range(cluster.m_cluster_pos.second, kaxCluster->GetSize());
-
-        cluster_two.insert(cluster_two.end(), cl.begin(), cl.end());
-    }
-    
-    set_receive_pieces(cluster_two);
-    m_cur_mode = mode::FINAL;
 }
